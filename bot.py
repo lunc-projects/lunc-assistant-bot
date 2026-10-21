@@ -4,7 +4,7 @@ Core: summarize hundreds of messages into a quick summary.
 Also: /catchup, /tldr, /ask (general AI Q&A), DM summary. Standalone — no other projects included.
 Run: TELEGRAM_BOT_TOKEN=... AI_API_KEY=... python bot.py
 """
-import os, re, time, json, datetime
+import os, re, time, json, datetime, pathlib
 import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
@@ -543,6 +543,15 @@ async def post_init(app: Application):
         await app.bot.set_my_commands([
             ("summary","Summarize group messages"),("catchup","What you missed"),("tldr","Shrink a message (reply to it)"),
             ("ask","Ask me anything"),("proposals","Proposals voting now"),("proposal","Proposal + tally"),("price","LUNC + USTC price"),("stats","Chain stats"),("burn","Live burn tax info"),("burnalerts","Burn notifications on/off"),("govalerts","Proposal alerts on/off"),("wallet","Public wallet lookup"),("token","CW20 token info"),("validators","Top validators"),("watchvalidator","Watch a validator"),("help","All commands")])
+        # Profile photo (owner's logo) — re-applied on boot so redeploys never lose it
+        try:
+            from telegram import InputProfilePhotoStatic
+            _pf = pathlib.Path(__file__).with_name("bot-profile-512.png")
+            if _pf.exists():
+                with open(_pf, "rb") as fh:
+                    await app.bot.set_my_profile_photo(photo=InputProfilePhotoStatic(photo=fh.read()))
+        except Exception as e:
+            print(f"profile photo: {e}")
         print("LUNC Assistant Bot: description + commands set")
     except Exception as e:
         print(f"post_init: {e}")
