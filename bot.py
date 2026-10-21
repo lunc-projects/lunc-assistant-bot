@@ -559,7 +559,10 @@ async def post_init(app: Application):
 def main():
     if not TOKEN:
         raise SystemExit("TELEGRAM_BOT_TOKEN is missing — paste it in Railway env vars (never in chat/repo).")
-    app = Application.builder().token(TOKEN).post_init(post_init).build()
+    _builder = Application.builder().token(TOKEN).post_init(post_init)
+    _proxy = os.getenv("OUTBOUND_PROXY")
+    if _proxy: _builder = _builder.proxy(_proxy).get_updates_proxy(_proxy)
+    app = _builder.build()
     app.add_handler(CommandHandler("start", on_start))
     app.add_handler(CommandHandler("help", on_start))
     app.add_handler(CommandHandler("summary", on_summary))

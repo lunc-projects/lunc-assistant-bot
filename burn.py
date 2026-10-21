@@ -1,3 +1,4 @@
+import os
 """Burn data — live, sourced. Correct endpoint only:
 burn tax = /terra/tax/v1beta1/params -> burn_tax_rate (currently 0.015 = 1.5%)
 NEVER use /terra/treasury/v1beta1/tax_rate (dead param, reads 0 wrongly).
@@ -9,7 +10,7 @@ BURN_WALLET_NOTE = "Burns go to the burn module / dead burn address via the tax 
 
 async def get_burn_tax_rate() -> float | None:
     try:
-        async with httpx.AsyncClient(timeout=20) as c:
+        async with httpx.AsyncClient(timeout=20, proxy=os.getenv('OUTBOUND_PROXY') or None) as c:
             r = await c.get(f"{LCD}/terra/tax/v1beta1/params"); r.raise_for_status()
             return float(r.json()["params"]["burn_tax_rate"])
     except Exception as e:
@@ -18,7 +19,7 @@ async def get_burn_tax_rate() -> float | None:
 async def get_lunc_supply() -> float | None:
     """Total LUNC supply in whole LUNC (uluna / 1e6). Supply drops are net of minting."""
     try:
-        async with httpx.AsyncClient(timeout=20) as c:
+        async with httpx.AsyncClient(timeout=20, proxy=os.getenv('OUTBOUND_PROXY') or None) as c:
             r = await c.get(f"{LCD}/cosmos/bank/v1beta1/supply/by_denom?denom=uluna"); r.raise_for_status()
             amt = r.json()["amount"]["amount"]
             return int(amt) / 1e6

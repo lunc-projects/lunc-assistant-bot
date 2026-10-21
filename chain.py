@@ -1,15 +1,15 @@
 """Live Terra Classic data — all endpoints verified 2026-10-21 via PublicNode LCD + CoinGecko.
 Standalone: generic public chain data only, no project-specific info."""
-import base64, json
+import base64, json, os
 import httpx
 LCD = "https://terra-classic-lcd.publicnode.com"
 
 async def _get(path):
-    async with httpx.AsyncClient(timeout=25) as c:
+    async with httpx.AsyncClient(timeout=25, proxy=os.getenv('OUTBOUND_PROXY') or None) as c:
         r = await c.get(f"{LCD}{path}"); r.raise_for_status(); return r.json()
 
 async def prices():
-    async with httpx.AsyncClient(timeout=25) as c:
+    async with httpx.AsyncClient(timeout=25, proxy=os.getenv('OUTBOUND_PROXY') or None) as c:
         r = await c.get("https://api.coingecko.com/api/v3/simple/price?ids=terra-luna,terrausd&vs_currencies=usd&include_24hr_change=true&include_market_cap=true&include_24hr_vol=true")
         r.raise_for_status(); return r.json()
 

@@ -10,7 +10,7 @@ async def chat(messages, temperature=0.3) -> str | None:
     if not AI_API_KEY:
         return None
     try:
-        async with httpx.AsyncClient(timeout=60) as c:
+        async with httpx.AsyncClient(timeout=60, proxy=os.getenv('OUTBOUND_PROXY') or None) as c:
             r = await c.post(f"{AI_BASE_URL.rstrip('/')}/chat/completions",
                 headers={"Authorization": f"Bearer {AI_API_KEY}"},
                 json={"model": AI_MODEL, "messages": messages, "temperature": temperature, "max_tokens": 2000})
