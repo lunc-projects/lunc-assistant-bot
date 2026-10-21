@@ -13,7 +13,7 @@ async def chat(messages, temperature=0.3) -> str | None:
         async with httpx.AsyncClient(timeout=60) as c:
             r = await c.post(f"{AI_BASE_URL.rstrip('/')}/chat/completions",
                 headers={"Authorization": f"Bearer {AI_API_KEY}"},
-                json={"model": AI_MODEL, "messages": messages, "temperature": temperature})
+                json={"model": AI_MODEL, "messages": messages, "temperature": temperature, "max_tokens": 2000})
             r.raise_for_status()
             return r.json()["choices"][0]["message"]["content"].strip()
     except Exception as e:

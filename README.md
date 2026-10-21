@@ -23,7 +23,7 @@ Bot creation and tokens live in your accounts, Tom builds/deploys everything els
 ### 2. Railway deploy (Tom prepares repo, you paste secrets)
 - New Railway project from this repo (lunc-projects/lunc-assistant-bot)
 - Variables: TELEGRAM_BOT_TOKEN (from BotFather), AI_API_KEY
-  - Cheapest start: Groq free key at console.groq.com + AI_BASE_URL=https://api.groq.com/openai/v1 + AI_MODEL=llama-3.1-8b-instant
+  - Cheapest start: Groq free key at console.groq.com + AI_BASE_URL=https://api.groq.com/openai/v1 + AI_MODEL=openai/gpt-oss-120b
   - Or OpenAI key + defaults
 - Start command is in Procfile: `python bot.py`
 
