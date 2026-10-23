@@ -286,7 +286,7 @@ async def on_calc(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 LINKS_TEXT = """🔗 *Official links only*
 Terra Classic: https://terra-classic.io (community)
 Block explorer / Finder: https://finder.terra.money/classic
-Galaxy Station wallet: https://galaxystation.io
+Galaxy Station wallet: https://station.terraclassic.community
 Keplr wallet: https://www.keplr.app
 LUNCDash: https://luncdash.com
 Governance forum: https://discuss.terra-classic.io (verify current forum in chat)
