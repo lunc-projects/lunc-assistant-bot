@@ -259,7 +259,7 @@ async def on_validator_info(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception: await update.message.reply_text("Couldn't fetch that validator right now.")
 
 STAKE_TEXT = """🥩 *How LUNC staking works*
-1. Hold LUNC in a wallet you control (Station, Leap, Keplr).
+1. Hold LUNC in a wallet you control (Galaxy Station, Keplr, Leap).
 2. Pick a validator — check commission, uptime, and voting record (/validators). Smaller validators help decentralisation.
 3. Delegate (stake) your LUNC to them. You can split across validators.
 4. You earn rewards in LUNC; claim them in your wallet app.
@@ -286,7 +286,9 @@ async def on_calc(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 LINKS_TEXT = """🔗 *Official links only*
 Terra Classic: https://terra-classic.io (community)
 Block explorer / Finder: https://finder.terra.money/classic
-Station wallet: https://station.terra.money
+Galaxy Station wallet: https://galaxystation.io
+Keplr wallet: https://www.keplr.app
+LUNCDash: https://luncdash.com
 Governance forum: https://discuss.terra-classic.io (verify current forum in chat)
 Terra Classic docs / GitHub: https://github.com/classic-terra
 CoinGecko LUNC: https://www.coingecko.com/en/coins/terra-luna
