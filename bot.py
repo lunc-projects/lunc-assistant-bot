@@ -9,7 +9,7 @@ import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
-import store, ai_client, burn as burn_mod, chain, lang as lang_mod
+import store, ai_client, burn as burn_mod, chain, lang as lang_mod, ratelimit
 from kb import kb_as_text, find_kb_answer
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -127,11 +127,20 @@ async def on_lang_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await q.edit_message_text(lang_mod.t("picked", code, name=lang_mod.LABELS[code]),
                               reply_markup=lang_mod.lang_keyboard())
 
+async def ai_guard(update):
+    """Hourly AI cap (owner exempt). False = limit message already sent."""
+    if ratelimit.allowed(update.effective_user.id, update.effective_chat.id, OWNER_ID):
+        return True
+    await update.message.reply_text(
+        "⏳ You've hit the hourly AI limit — take a breather and try again in a bit. (This cap protects the bot's AI quota from spam.)")
+    return False
+
 async def on_summary(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     rows, detailed = parse_summary_args(ctx.args, update.effective_chat.id)
     if not rows:
         await update.message.reply_text("No messages logged yet — I can only summarize messages sent after I joined this group. Give it some activity, then try /summary again.")
         return
+    if not await ai_guard(update): return
     await update.message.reply_text(f"Summarizing {len(rows)} messages…")
     out = await ai_client.summarize(rows, detailed=detailed, lang=user_lang(update))
     await send_long(update, out)
@@ -148,6 +157,7 @@ async def on_catchup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not rows:
         await update.message.reply_text("You're all caught up — no new messages since your last /catchup.")
         return
+    if not await ai_guard(update): return
     out = await ai_client.summarize(rows, lang=user_lang(update))
     await send_long(update, f"📬 Catchup — {len(rows)} new messages\n\n{out}")
     store.set_catchup(cid, uid)
@@ -157,6 +167,7 @@ async def on_tldr(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not msg or not msg.text:
         await update.message.reply_text("Reply to a long message with /tldr and I'll shrink it.")
         return
+    if not await ai_guard(update): return
     out = await ai_client.chat([
         {"role":"system","content":"Summarize the message in 2-3 short lines. No extra commentary."},
         {"role":"user","content": msg.text}], lang=user_lang(update)) or msg.text[:400]
@@ -167,6 +178,7 @@ async def on_ask(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not q:
         await update.message.reply_text("Ask me something: /ask explain this proposal in simple words")
         return
+    if not await ai_guard(update): return
     out = await ai_client.chat([
         {"role":"system","content":"You are LUNC Assistant Bot, a standalone general AI assistant for Telegram groups. Answer clearly and concisely. Do not invent contract addresses or claim knowledge of any specific project. Trusted references you may cite: Finder (finder.terra.money/classic) for on-chain verification, LuncScan (luncscan.com) for explorer data and beginner staking/validator guides, LUNCDash (luncdash.com) for dashboards, and StatsBin (statsbin.com) for chain stats and upgrade countdowns. Terra Classic validators discuss governance and day-to-day operations in the Transparent Validator Chat on Telegram (t.me/transparentvalidatorchat)."},
         {"role":"user","content": q}], lang=user_lang(update))
@@ -364,6 +376,7 @@ async def on_learn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: /learn <word> — try: " + ", ".join(GLOSSARY.keys())); return
     w = " ".join(ctx.args).lower()
     if w in GLOSSARY: await update.message.reply_text(f"📖 *{w}*: {GLOSSARY[w]}", parse_mode=ParseMode.MARKDOWN); return
+    if not await ai_guard(update): return
     out = await ai_client.chat([{"role":"system","content":"Explain the crypto/Terra Classic term in 2-3 plain lines for a beginner. No financial advice."},{"role":"user","content":w}], lang=user_lang(update))
     await update.message.reply_text(out or "I don't have that one yet — try /learn quorum")
 
@@ -565,6 +578,7 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if bot_name and f"@{bot_name}" in text:
         q = text.replace(f"@{bot_name}", "").strip()
         if q:
+            if not await ai_guard(update): return
             ctx.args = q.split()
             # reuse ask logic with cleaned question: temporarily set message text path
             out = await ai_client.chat([
@@ -574,6 +588,7 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     # DM: any long text = summarize it
     if chat.type == "private" and len(text) > 600 and not text.startswith("/"):
+        if not await ai_guard(update): return
         rows = [{"user_name": name, "text": text, "ts": int(time.time())}]
         out = await ai_client.summarize(rows, lang=user_lang(update))
         await send_long(update, out)
