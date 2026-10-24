@@ -120,3 +120,18 @@ def get_catchup_id(chat_id, user_id):
     r = c.execute("SELECT last_seen_id FROM catchup WHERE chat_id=? AND user_id=?", (chat_id, user_id)).fetchone()
     c.close()
     return r["last_seen_id"] if r else None
+
+def usage_counts():
+    """Owner-only usage snapshot: distinct chats/people the bot has actually seen."""
+    c = _conn()
+    def q(sql):
+        r = c.execute(sql).fetchone()
+        return r[0] if r else 0
+    out = {
+        "groups": q("SELECT COUNT(DISTINCT chat_id) FROM messages WHERE chat_id < 0"),
+        "people_in_groups": q("SELECT COUNT(DISTINCT user_id) FROM messages WHERE chat_id < 0 AND user_id IS NOT NULL"),
+        "dm_users": q("SELECT COUNT(DISTINCT chat_id) FROM (SELECT chat_id FROM chat_settings WHERE chat_id > 0 UNION SELECT chat_id FROM catchup WHERE chat_id > 0)"),
+        "messages": q("SELECT COUNT(*) FROM messages"),
+    }
+    c.close()
+    return out

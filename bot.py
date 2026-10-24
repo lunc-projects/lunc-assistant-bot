@@ -87,6 +87,18 @@ async def send_long(update, text):
     for i in range(0, len(text), 3900):
         await update.message.reply_text(text[i:i+3900])
 
+async def on_botstats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    # Owner-only usage counter (not in the public command list).
+    if not OWNER_ID or update.effective_user.id != OWNER_ID:
+        return
+    u = store.usage_counts()
+    await update.message.reply_text(
+        "*Bot usage* (since the last deploy — the log resets on redeploys, 7-day rolling)\n"
+        f"Groups I'm in and logging: {u['groups']}\n"
+        f"People seen talking in those groups: {u['people_in_groups']}\n"
+        f"People who've used me in DM (settings/catchup): {u['dm_users']}\n"
+        f"Messages currently logged: {u['messages']}", parse_mode=ParseMode.MARKDOWN)
+
 async def on_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(HELP, parse_mode=ParseMode.MARKDOWN)
 
@@ -566,6 +578,7 @@ def main():
     if _proxy: _builder = _builder.proxy(_proxy).get_updates_proxy(_proxy)
     app = _builder.build()
     app.add_handler(CommandHandler("start", on_start))
+    app.add_handler(CommandHandler("botstats", on_botstats))
     app.add_handler(CommandHandler("help", on_start))
     app.add_handler(CommandHandler("summary", on_summary))
     app.add_handler(CommandHandler("catchup", on_catchup))
