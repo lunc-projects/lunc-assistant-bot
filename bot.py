@@ -14,6 +14,10 @@ from kb import kb_as_text, find_kb_answer
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 OWNER_ID = int(os.getenv("OWNER_TELEGRAM_ID", "0") or 0)
+# AI kill switch — False disables ALL AI (Groq) features until the security
+# review is settled. Flip back to True to re-enable. Simple (non-AI)
+# commands keep working either way.
+AI_ENABLED = False
 LCD = "https://terra-classic-lcd.publicnode.com"
 BIG_BURN_THRESHOLD = float(os.getenv("BIG_BURN_THRESHOLD_LUNC", "100000000"))
 
@@ -128,7 +132,12 @@ async def on_lang_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                               reply_markup=lang_mod.lang_keyboard())
 
 async def ai_guard(update):
-    """Hourly AI cap (owner exempt). False = limit message already sent."""
+    """AI gate. False = disabled/limit message already sent."""
+    if not AI_ENABLED:
+        await update.message.reply_text(
+            "🤖 AI features are temporarily disabled while we review security. "
+            "Simple commands still work: /price, /validators, /proposals, /links, /calc, /stake, /safety.")
+        return False
     if ratelimit.allowed(update.effective_user.id, update.effective_chat.id, OWNER_ID):
         return True
     await update.message.reply_text(
