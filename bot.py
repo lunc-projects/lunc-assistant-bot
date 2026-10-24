@@ -222,7 +222,7 @@ async def ai_guard(update):
     if not AI_ENABLED:
         await update.message.reply_text(
             "🤖 AI features are temporarily disabled while we review security. "
-            "Simple commands still work: /price, /validators, /proposals, /links, /calc, /stake, /safety.")
+            "Simple commands still work: /price, /validators, /proposals, /links, /calc, /stake, /safety. /summary and /catchup also work as basic non-AI summaries while AI is off.")
         return False
     user_id = update.effective_user.id
     chat = update.effective_chat
@@ -239,10 +239,21 @@ async def ai_guard(update):
         "⏳ You've hit the hourly AI limit — take a breather and try again in a bit. (This cap protects the bot's AI quota from spam.)")
     return False
 
+FALLBACK_NOTE = "📋 Basic summary (AI is off — no AI used):\n\n"
+
+def fallback_text(rows, detailed=False):
+    """Local extractive summary for when AI is off. Zero tokens, no AI call,
+    so rank and rate limits (which protect Groq quota) do not apply to it."""
+    return FALLBACK_NOTE + ai_client.extractive_summary(rows, detailed=detailed)
+
 async def on_summary(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     rows, detailed = parse_summary_args(ctx.args, update.effective_chat.id)
     if not rows:
         await update.message.reply_text("No messages logged yet — I can only summarize messages sent after I joined this group. Give it some activity, then try /summary again.")
+        return
+    if not AI_ENABLED:
+        await send_long(update, fallback_text(rows, detailed=detailed))
+        store.set_catchup(update.effective_chat.id, update.effective_user.id)
         return
     if not await ai_guard(update): return
     await update.message.reply_text(f"Summarizing {len(rows)} messages…")
@@ -260,6 +271,10 @@ async def on_catchup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         rows = store.get_messages(cid, limit=1000, after_id=last)
     if not rows:
         await update.message.reply_text("You're all caught up — no new messages since your last /catchup.")
+        return
+    if not AI_ENABLED:
+        await send_long(update, f"📬 Catchup — {len(rows)} new messages (basic summary, AI off)\n\n{ai_client.extractive_summary(rows)}")
+        store.set_catchup(cid, uid)
         return
     if not await ai_guard(update): return
     out = await ai_client.summarize(rows, lang=user_lang(update))
@@ -692,6 +707,10 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     # DM: any long text = summarize it
     if chat.type == "private" and len(text) > 600 and not text.startswith("/"):
+        if not AI_ENABLED:
+            rows = [{"user_name": name, "text": text, "ts": int(time.time())}]
+            await send_long(update, fallback_text(rows))
+            return
         if not await ai_guard(update): return
         rows = [{"user_name": name, "text": text, "ts": int(time.time())}]
         out = await ai_client.summarize(rows, lang=user_lang(update))
