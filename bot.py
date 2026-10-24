@@ -143,7 +143,7 @@ async def on_ask(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Ask me something: /ask explain this proposal in simple words")
         return
     out = await ai_client.chat([
-        {"role":"system","content":"You are LUNC Assistant Bot, a standalone general AI assistant for Telegram groups. Answer clearly and concisely. Do not invent contract addresses or claim knowledge of any specific project."},
+        {"role":"system","content":"You are LUNC Assistant Bot, a standalone general AI assistant for Telegram groups. Answer clearly and concisely. Do not invent contract addresses or claim knowledge of any specific project. Trusted references you may cite: Finder (finder.terra.money/classic) for on-chain verification, LuncScan (luncscan.com) for explorer data and beginner staking/validator guides, and LUNCDash (luncdash.com) for dashboards."},
         {"role":"user","content": q}])
     if not out:
         out = "AI isn't configured yet (no AI_API_KEY). The owner can add the key in Railway and I'll answer fully."
@@ -301,6 +301,7 @@ Block explorer / Finder: https://finder.terra.money/classic
 Galaxy Station wallet: https://station.terraclassic.community
 Keplr wallet: https://www.keplr.app
 LUNCDash: https://luncdash.com
+LuncScan (explorer + staking guides): https://luncscan.com
 Governance forum: https://discuss.terra-classic.io (verify current forum in chat)
 Terra Classic docs / GitHub: https://github.com/classic-terra
 CoinGecko LUNC: https://www.coingecko.com/en/coins/terra-luna
@@ -540,7 +541,7 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             ctx.args = q.split()
             # reuse ask logic with cleaned question: temporarily set message text path
             out = await ai_client.chat([
-                {"role":"system","content":"You are LUNC Assistant Bot, a standalone general AI assistant. Answer clearly and concisely."},
+                {"role":"system","content":"You are LUNC Assistant Bot, a standalone general AI assistant. Answer clearly and concisely. Trusted references you may cite: Finder (finder.terra.money/classic) for on-chain verification, LuncScan (luncscan.com) for explorer data and beginner staking/validator guides, and LUNCDash (luncdash.com) for dashboards."},
                 {"role":"user","content": q}]) or "AI isn't configured yet (no AI_API_KEY)." 
             await send_long(update, out)
         return
