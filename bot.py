@@ -9,15 +9,16 @@ import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
-import store, ai_client, burn as burn_mod, chain, lang as lang_mod, ratelimit
+import store, ai_client, burn as burn_mod, chain, lang as lang_mod, ratelimit, budget
 from kb import kb_as_text, find_kb_answer
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 OWNER_ID = int(os.getenv("OWNER_TELEGRAM_ID", "0") or 0)
-# AI kill switch — False disables ALL AI (Groq) features until the security
-# review is settled. Flip back to True to re-enable. Simple (non-AI)
+# AI kill switch — True means AI features are live, governed by rank,
+# hourly caps, and the daily token pot (budget.py: 200,000/day, the Groq
+# free allowance). Flip to False to disable ALL AI again. Simple (non-AI)
 # commands keep working either way.
-AI_ENABLED = False
+AI_ENABLED = True
 LCD = "https://terra-classic-lcd.publicnode.com"
 BIG_BURN_THRESHOLD = float(os.getenv("BIG_BURN_THRESHOLD_LUNC", "100000000"))
 
@@ -60,6 +61,9 @@ Or just @mention me in the group, or DM me
 /rank — your rank + what it unlocks
 Rank 0: new here, no AI queries yet · Rank 1: regular, standard caps · Rank 2: trusted, higher caps
 Rank is earned by chatting on distinct days (not message count). Owner: /rankset, /rankclear (in groups)
+
+*Daily AI pot*
+200,000 tokens a day (the free-plan allowance). When the pot runs out, AI pauses with a "daily limit reached" note until midnight UTC — simple commands and basic summaries keep working.
 
 *Notifications (your choice, on/off)*
 /burnalerts — burn notifications menu (master on/off + types)
@@ -107,7 +111,8 @@ async def on_botstats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"Groups I'm in and logging: {u['groups']}\n"
         f"People seen talking in those groups: {u['people_in_groups']}\n"
         f"People who've used me in DM (settings/catchup): {u['dm_users']}\n"
-        f"Messages currently logged: {u['messages']}", parse_mode=ParseMode.MARKDOWN)
+        f"Messages currently logged: {u['messages']}\n"
+        f"Daily AI pot used today (UTC): {budget.spent():,} / {budget.DAILY_TOKEN_BUDGET:,} estimated tokens", parse_mode=ParseMode.MARKDOWN)
 
 def user_lang(update):
     """The requester's language. Personal, never a group setting: one user
@@ -243,7 +248,8 @@ FALLBACK_NOTE = "📋 Basic summary (AI is off — no AI used):\n\n"
 
 def fallback_text(rows, detailed=False):
     """Local extractive summary for when AI is off. Zero tokens, no AI call,
-    so rank and rate limits (which protect Groq quota) do not apply to it."""
+    so rank, rate limits, and the daily pot (which protect the Groq quota)
+    do not apply to it."""
     return FALLBACK_NOTE + ai_client.extractive_summary(rows, detailed=detailed)
 
 async def on_summary(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -289,7 +295,9 @@ async def on_tldr(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await ai_guard(update): return
     out = await ai_client.chat([
         {"role":"system","content":"Summarize the message in 2-3 short lines. No extra commentary."},
-        {"role":"user","content": msg.text}], lang=user_lang(update)) or msg.text[:400]
+        {"role":"user","content": msg.text}], lang=user_lang(update))
+    if not out:
+        out = ai_client.DAILY_LIMIT_NOTE if budget.exhausted() else msg.text[:400]
     await update.message.reply_text(f"⚡ TL;DR: {out}")
 
 async def on_ask(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -302,7 +310,7 @@ async def on_ask(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         {"role":"system","content":"You are LUNC Assistant Bot, a standalone general AI assistant for Telegram groups. Answer clearly and concisely. Do not invent contract addresses or claim knowledge of any specific project. Trusted references you may cite: Finder (finder.terra.money/classic) for on-chain verification, LuncScan (luncscan.com) for explorer data and beginner staking/validator guides, LUNCDash (luncdash.com) for dashboards, and StatsBin (statsbin.com) for chain stats and upgrade countdowns. Terra Classic validators discuss governance and day-to-day operations in the Transparent Validator Chat on Telegram (t.me/transparentvalidatorchat)."},
         {"role":"user","content": q}], lang=user_lang(update))
     if not out:
-        out = "AI isn't configured yet (no AI_API_KEY). The owner can add the key in Railway and I'll answer fully."
+        out = ai_client.DAILY_LIMIT_NOTE if budget.exhausted() else "AI isn't configured yet (no AI_API_KEY). The owner can add the key in Railway and I'll answer fully."
     await send_long(update, out)
 
 
@@ -497,7 +505,9 @@ async def on_learn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if w in GLOSSARY: await update.message.reply_text(f"📖 *{w}*: {GLOSSARY[w]}", parse_mode=ParseMode.MARKDOWN); return
     if not await ai_guard(update): return
     out = await ai_client.chat([{"role":"system","content":"Explain the crypto/Terra Classic term in 2-3 plain lines for a beginner. No financial advice."},{"role":"user","content":w}], lang=user_lang(update))
-    await update.message.reply_text(out or "I don't have that one yet — try /learn quorum")
+    if not out:
+        out = ai_client.DAILY_LIMIT_NOTE if budget.exhausted() else "I don't have that one yet — try /learn quorum"
+    await update.message.reply_text(out)
 
 # ================= GOV ALERTS (voting + proposals) =================
 def gov_keyboard(chat_id):
@@ -702,7 +712,9 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             # reuse ask logic with cleaned question: temporarily set message text path
             out = await ai_client.chat([
                 {"role":"system","content":"You are LUNC Assistant Bot, a standalone general AI assistant. Answer clearly and concisely. Trusted references you may cite: Finder (finder.terra.money/classic) for on-chain verification, LuncScan (luncscan.com) for explorer data and beginner staking/validator guides, LUNCDash (luncdash.com) for dashboards, and StatsBin (statsbin.com) for chain stats and upgrade countdowns. Terra Classic validators discuss governance and day-to-day operations in the Transparent Validator Chat on Telegram (t.me/transparentvalidatorchat)."},
-                {"role":"user","content": q}], lang=user_lang(update)) or "AI isn't configured yet (no AI_API_KEY)." 
+                {"role":"user","content": q}], lang=user_lang(update))
+            if not out:
+                out = ai_client.DAILY_LIMIT_NOTE if budget.exhausted() else "AI isn't configured yet (no AI_API_KEY)."
             await send_long(update, out)
         return
     # DM: any long text = summarize it
