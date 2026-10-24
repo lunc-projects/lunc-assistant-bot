@@ -22,6 +22,10 @@ USER_PER_HOUR = 20
 CHAT_PER_HOUR = 100
 WINDOW = 3600
 
+# Hourly caps by rank: (per-user, per-chat). Rank 0 never reaches this
+# function — the rank gate in ai_guard blocks rank 0 before any cap check.
+RANK_CAPS = {1: (20, 100), 2: (50, 200)}
+
 _user_calls: dict[int, deque] = {}
 _chat_calls: dict[int, deque] = {}
 
@@ -31,8 +35,8 @@ def _prune(q, now):
         q.popleft()
 
 
-def allowed(user_id, chat_id, owner_id=0, now=None):
-    """True if this AI call fits both caps; records the call when allowed.
+def allowed_for_rank(user_id, chat_id, owner_id=0, rank=1, now=None):
+    """True if this AI call fits the rank's caps; records the call when allowed.
 
     Synchronous on purpose: check + record happen with no await between
     them, so two concurrent handlers can't both slip past the cap.
@@ -40,15 +44,21 @@ def allowed(user_id, chat_id, owner_id=0, now=None):
     if owner_id and user_id == owner_id:
         return True
     now = time.time() if now is None else now
+    user_cap, chat_cap = RANK_CAPS.get(rank, RANK_CAPS[1])
     uq = _user_calls.setdefault(user_id, deque())
     cq = _chat_calls.setdefault(chat_id, deque())
     _prune(uq, now)
     _prune(cq, now)
-    if len(uq) >= USER_PER_HOUR or len(cq) >= CHAT_PER_HOUR:
+    if len(uq) >= user_cap or len(cq) >= chat_cap:
         return False
     uq.append(now)
     cq.append(now)
     return True
+
+
+def allowed(user_id, chat_id, owner_id=0, now=None):
+    """Rank-1 caps (kept for callers that don't know the rank)."""
+    return allowed_for_rank(user_id, chat_id, owner_id, rank=1, now=now)
 
 
 def reset():

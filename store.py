@@ -15,6 +15,7 @@ def _conn():
         chat_id INTEGER, key TEXT, value TEXT, PRIMARY KEY(chat_id,key))""")
     c.execute("""CREATE TABLE IF NOT EXISTS user_lang(
         user_id INTEGER PRIMARY KEY, lang TEXT)""")
+    _ensure_rank_tables(c)
     return c
 
 # --- Per-user language (personal choice: never a group setting) ---
@@ -102,9 +103,14 @@ def update_snapshot(chat_id, valoper, snapshot_json):
 def log_message(chat_id, user_id, user_name, text, message_id):
     if not text: return
     c = _conn()
+    now = int(time.time())
     c.execute("INSERT INTO messages(chat_id,user_id,user_name,text,ts,message_id) VALUES(?,?,?,?,?,?)",
-              (chat_id, user_id, user_name, text, int(time.time()), message_id))
-    c.execute("DELETE FROM messages WHERE ts < ?", (int(time.time()) - RETENTION_DAYS*86400,))
+              (chat_id, user_id, user_name, text, now, message_id))
+    c.execute("DELETE FROM messages WHERE ts < ?", (now - RETENTION_DAYS*86400,))
+    # Rank day: one row per user per UTC day they actually chatted. Commands
+    # are never logged, so querying can never earn rank.
+    c.execute("INSERT OR IGNORE INTO rank_days(chat_id,user_id,day) VALUES(?,?,date(?, 'unixepoch'))",
+              (chat_id, user_id, now))
     c.commit(); c.close()
 
 def get_messages(chat_id, limit=200, since_ts=None, after_id=None):
@@ -149,3 +155,75 @@ def usage_counts():
     }
     c.close()
     return out
+
+# --- Ranks: who may use AI queries ---
+# Rank is earned by chatting on distinct UTC days in a group (one rank-day
+# per calendar day max, however many messages). Raw message counts can be
+# farmed by spamming; distinct days cannot. Commands are never logged, so
+# querying can never earn rank.
+#   rank 0: fewer than RANK_DAYS_1 distinct days (includes never seen) — no AI queries
+#   rank 1: RANK_DAYS_1..RANK_DAYS_2-1 days — AI queries, standard hourly caps
+#   rank 2: RANK_DAYS_2+ days — AI queries, higher hourly caps
+# A manual override (owner-set) always wins over the earned rank.
+# Caveat, same as the rest of this bot: the DB lives on ephemeral disk, so
+# a redeploy resets rank history; the owner can re-grant with /rankset.
+RANK_DAYS_1 = 3
+RANK_DAYS_2 = 30
+
+def _ensure_rank_tables(c):
+    c.execute("""CREATE TABLE IF NOT EXISTS rank_days(
+        chat_id INTEGER, user_id INTEGER, day TEXT,
+        PRIMARY KEY(chat_id, user_id, day))""")
+    c.execute("""CREATE TABLE IF NOT EXISTS rank_override(
+        chat_id INTEGER, user_id INTEGER, rank INTEGER, set_by INTEGER, ts INTEGER,
+        PRIMARY KEY(chat_id, user_id))""")
+    # Idempotent seed from the surviving message log (helps after a restart;
+    # a redeploy wipes the whole DB anyway, like everything else here).
+    c.execute("""INSERT OR IGNORE INTO rank_days(chat_id, user_id, day)
+                 SELECT chat_id, user_id, date(ts, 'unixepoch')
+                 FROM messages WHERE user_id IS NOT NULL""")
+
+def _rank_from_days(days):
+    return 2 if days >= RANK_DAYS_2 else (1 if days >= RANK_DAYS_1 else 0)
+
+def days_active(chat_id, user_id):
+    c = _conn()
+    r = c.execute("SELECT COUNT(*) FROM rank_days WHERE chat_id=? AND user_id=?", (chat_id, user_id)).fetchone()
+    c.close()
+    return r[0]
+
+def days_active_anywhere(user_id):
+    c = _conn()
+    r = c.execute("SELECT COUNT(DISTINCT day) FROM rank_days WHERE user_id=?", (user_id,)).fetchone()
+    c.close()
+    return r[0]
+
+def rank_info(chat_id, user_id):
+    """(rank, days_active, manual_override_or_None) for one group chat."""
+    c = _conn()
+    r = c.execute("SELECT rank FROM rank_override WHERE chat_id=? AND user_id=?", (chat_id, user_id)).fetchone()
+    c.close()
+    if r is not None:
+        return r["rank"], days_active(chat_id, user_id), r["rank"]
+    days = days_active(chat_id, user_id)
+    return _rank_from_days(days), days, None
+
+def rank_for(chat_id, user_id):
+    return rank_info(chat_id, user_id)[0]
+
+def rank_anywhere(user_id):
+    """DM rank: earned days across all logged groups, no per-chat override."""
+    return _rank_from_days(days_active_anywhere(user_id))
+
+def set_rank_override(chat_id, user_id, rank, set_by):
+    if rank not in (0, 1, 2):
+        raise ValueError("rank must be 0, 1 or 2")
+    c = _conn()
+    c.execute("INSERT INTO rank_override(chat_id,user_id,rank,set_by,ts) VALUES(?,?,?,?,?) ON CONFLICT(chat_id,user_id) DO UPDATE SET rank=excluded.rank, set_by=excluded.set_by, ts=excluded.ts",
+              (chat_id, user_id, rank, set_by, int(time.time())))
+    c.commit(); c.close()
+
+def clear_rank_override(chat_id, user_id):
+    c = _conn()
+    cur = c.execute("DELETE FROM rank_override WHERE chat_id=? AND user_id=?", (chat_id, user_id))
+    c.commit(); n = cur.rowcount; c.close(); return n

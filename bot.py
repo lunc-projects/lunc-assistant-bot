@@ -56,6 +56,11 @@ Or just @mention me in the group, or DM me
 /safety — scam / seed phrase safety rules
 /learn <word> — plain-English glossary (e.g. /learn quorum)
 
+*Ranks (AI access)*
+/rank — your rank + what it unlocks
+Rank 0: new here, no AI queries yet · Rank 1: regular, standard caps · Rank 2: trusted, higher caps
+Rank is earned by chatting on distinct days (not message count). Owner: /rankset, /rankclear (in groups)
+
 *Notifications (your choice, on/off)*
 /burnalerts — burn notifications menu (master on/off + types)
 /govalerts — proposal / voting notifications menu (new, ending soon, result)
@@ -121,6 +126,83 @@ async def on_language(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(lang_mod.t("current", lg, name=lang_mod.LABELS[lg]),
                                     reply_markup=lang_mod.lang_keyboard())
 
+async def on_rank(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Anyone's own rank + what it unlocks. Not an AI call."""
+    chat, user = update.effective_chat, update.effective_user
+    if chat.type == "private":
+        rank = store.rank_anywhere(user.id)
+        days = store.days_active_anywhere(user.id)
+        scope, override = "across all groups I log", None
+    else:
+        rank, days, override = store.rank_info(chat.id, user.id)
+        scope = "in this chat"
+    if rank == 0:
+        unlocks = "AI queries are locked — chat in a group on a few different days to reach rank 1."
+    elif rank == 1:
+        unlocks = "AI queries unlocked (standard hourly caps)."
+    else:
+        unlocks = "AI queries unlocked (higher hourly caps)."
+    extra = " (set by the owner)" if override is not None else ""
+    await update.message.reply_text(
+        f"🎖 Your rank {scope}: {rank}{extra}\n"
+        f"Distinct days active: {days} (rank 1 at {store.RANK_DAYS_1}, rank 2 at {store.RANK_DAYS_2})\n{unlocks}")
+
+def _rankset_target(update, ctx):
+    """(user_id, rank, error) from a reply or from args. rank=None for /rankclear."""
+    msg = update.message
+    args = ctx.args or []
+    if msg.reply_to_message and msg.reply_to_message.from_user:
+        target = msg.reply_to_message.from_user.id
+        rank_s = args[0] if args else None
+    elif len(args) >= 2:
+        try:
+            target = int(args[0])
+        except (TypeError, ValueError):
+            target = None
+        rank_s = args[1]
+    elif len(args) == 1:
+        try:
+            target = int(args[0])
+        except (TypeError, ValueError):
+            target = None
+        rank_s = None
+    else:
+        target, rank_s = None, None
+    return target, rank_s
+
+async def on_rankset(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Owner-only, groups only: /rankset <0|1|2> as a reply, or /rankset <user_id> <0|1|2>."""
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("🔒 Only the bot owner can set ranks."); return
+    if update.effective_chat.type == "private":
+        await update.message.reply_text("Run /rankset in the group the rank belongs to."); return
+    target, rank_s = _rankset_target(update, ctx)
+    if target is None or rank_s is None:
+        await update.message.reply_text("Usage: reply to someone's message with /rankset <0|1|2>, or /rankset <user_id> <0|1|2>."); return
+    try:
+        rank = int(rank_s)
+    except (TypeError, ValueError):
+        await update.message.reply_text("Rank must be 0, 1 or 2."); return
+    if rank not in (0, 1, 2):
+        await update.message.reply_text("Rank must be 0, 1 or 2."); return
+    store.set_rank_override(update.effective_chat.id, target, rank, update.effective_user.id)
+    await update.message.reply_text(f"✅ Rank set to {rank} for user {target} in this chat.")
+
+async def on_rankclear(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Owner-only, groups only: drop a manual rank so the earned rank applies again."""
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("🔒 Only the bot owner can clear ranks."); return
+    if update.effective_chat.type == "private":
+        await update.message.reply_text("Run /rankclear in the group the rank belongs to."); return
+    target, _ = _rankset_target(update, ctx)
+    if target is None:
+        await update.message.reply_text("Usage: reply to someone's message with /rankclear, or /rankclear <user_id>."); return
+    n = store.clear_rank_override(update.effective_chat.id, target)
+    if n:
+        await update.message.reply_text(f"✅ Manual rank cleared for user {target} — their earned rank applies again.")
+    else:
+        await update.message.reply_text("No manual rank was set for that user — their earned rank already applies.")
+
 async def on_lang_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     code = (q.data or "").split(":", 1)[1] if ":" in (q.data or "") else ""
@@ -131,14 +213,27 @@ async def on_lang_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await q.edit_message_text(lang_mod.t("picked", code, name=lang_mod.LABELS[code]),
                               reply_markup=lang_mod.lang_keyboard())
 
+RANK0_NOTE = ("🔰 You're rank 0, so AI queries are locked for now. "
+              "Chat in a group on a few different days to reach rank 1 — "
+              "no AI call was spent on this message.")
+
 async def ai_guard(update):
-    """AI gate. False = disabled/limit message already sent."""
+    """AI gate: kill switch, then rank, then hourly cap. False = message already sent."""
     if not AI_ENABLED:
         await update.message.reply_text(
             "🤖 AI features are temporarily disabled while we review security. "
             "Simple commands still work: /price, /validators, /proposals, /links, /calc, /stake, /safety.")
         return False
-    if ratelimit.allowed(update.effective_user.id, update.effective_chat.id, OWNER_ID):
+    user_id = update.effective_user.id
+    chat = update.effective_chat
+    if chat.type == "private":
+        rank = store.rank_anywhere(user_id)
+    else:
+        rank = store.rank_for(chat.id, user_id)
+    if user_id != OWNER_ID and rank == 0:
+        await update.message.reply_text(RANK0_NOTE)
+        return False
+    if ratelimit.allowed_for_rank(user_id, chat.id, OWNER_ID, rank=rank):
         return True
     await update.message.reply_text(
         "⏳ You've hit the hourly AI limit — take a breather and try again in a bit. (This cap protects the bot's AI quota from spam.)")
@@ -608,7 +703,7 @@ async def post_init(app: Application):
         await app.bot.set_my_short_description("Summarizes hundreds of group messages into a quick summary + AI assistant.")
         await app.bot.set_my_commands([
             ("summary","Summarize group messages"),("catchup","What you missed"),("tldr","Shrink a message (reply to it)"),
-            ("ask","Ask me anything"),("proposals","Proposals voting now"),("proposal","Proposal + tally"),("price","LUNC + USTC price"),("stats","Chain stats"),("burn","Live burn tax info"),("burnalerts","Burn notifications on/off"),("govalerts","Proposal alerts on/off"),("wallet","Public wallet lookup"),("token","CW20 token info"),("validators","Top validators"),("watchvalidator","Watch a validator"),("language","Choose your language"),("help","All commands")])
+            ("ask","Ask me anything"),("proposals","Proposals voting now"),("proposal","Proposal + tally"),("price","LUNC + USTC price"),("stats","Chain stats"),("burn","Live burn tax info"),("burnalerts","Burn notifications on/off"),("govalerts","Proposal alerts on/off"),("wallet","Public wallet lookup"),("token","CW20 token info"),("validators","Top validators"),("watchvalidator","Watch a validator"),("rank","Your rank in this chat"),("language","Choose your language"),("help","All commands")])
         # Profile photo (owner's logo) — re-applied on boot so redeploys never lose it
         try:
             from telegram import InputProfilePhotoStatic
@@ -632,6 +727,9 @@ def main():
     app.add_handler(CommandHandler("start", on_start))
     app.add_handler(CommandHandler("botstats", on_botstats))
     app.add_handler(CommandHandler("help", on_help))
+    app.add_handler(CommandHandler("rank", on_rank))
+    app.add_handler(CommandHandler("rankset", on_rankset))
+    app.add_handler(CommandHandler("rankclear", on_rankclear))
     app.add_handler(CommandHandler("language", on_language))
     app.add_handler(CommandHandler("summary", on_summary))
     app.add_handler(CommandHandler("catchup", on_catchup))
