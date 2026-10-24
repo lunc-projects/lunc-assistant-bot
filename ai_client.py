@@ -30,7 +30,10 @@ async def chat(messages, temperature=0.3, lang="en") -> str | None:
         async with httpx.AsyncClient(timeout=60, proxy=os.getenv('OUTBOUND_PROXY') or None) as c:
             r = await c.post(f"{AI_BASE_URL.rstrip('/')}/chat/completions",
                 headers={"Authorization": f"Bearer {AI_API_KEY}"},
-                json={"model": AI_MODEL, "messages": messages, "temperature": temperature, "max_tokens": 2000})
+# Token policy: tight caps to stay inside the free Groq tier (output capped at
+# 800 tokens; summary input capped at ~20k chars). Data-command replies use no
+# AI tokens at all — only the AI paths call this module.
+                json={"model": AI_MODEL, "messages": messages, "temperature": temperature, "max_tokens": 800})
             r.raise_for_status()
             return r.json()["choices"][0]["message"]["content"].strip()
     except Exception as e:
@@ -68,14 +71,15 @@ Format exactly:
 ❓ Unanswered Questions
 🔗 Links / Contracts / Proposals Mentioned (deduped, or 'None')
 📋 Action Items (with @name if named, or 'None')
-Be accurate, do not invent messages, contracts, or decisions not in the log. Keep it short."""
+Be accurate, do not invent messages, contracts, or decisions not in the log. Keep it tight: short bullets, no filler, whole summary well under 800 tokens."""
 
 async def summarize(rows, detailed=False, kb_text="", lang="en") -> str:
     if not rows:
         return "No messages logged yet. I can only summarize messages sent after I joined this group."
     transcript = "\n".join(f"[{r['ts']}] {r['user_name']}: {r['text']}" for r in rows if r["text"])
-    # Keep within sane prompt size: last ~40k chars
-    transcript = transcript[-40000:]
+    # Keep within sane prompt size: last ~20k chars (token policy — summaries
+    # are the biggest input cost, and 20k chars still covers a busy group)
+    transcript = transcript[-20000:]
     out = await chat([
         {"role": "system", "content": SUMMARY_SYSTEM + ("\nGive more detail per topic." if detailed else "")},
         {"role": "user", "content": f"Summarize these {len(rows)} messages:\n\n{transcript}"},
