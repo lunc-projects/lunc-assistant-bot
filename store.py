@@ -13,7 +13,21 @@ def _conn():
         chat_id INTEGER, user_id INTEGER, last_seen_id INTEGER, PRIMARY KEY(chat_id,user_id))""")
     c.execute("""CREATE TABLE IF NOT EXISTS chat_settings(
         chat_id INTEGER, key TEXT, value TEXT, PRIMARY KEY(chat_id,key))""")
+    c.execute("""CREATE TABLE IF NOT EXISTS user_lang(
+        user_id INTEGER PRIMARY KEY, lang TEXT)""")
     return c
+
+# --- Per-user language (personal choice: never a group setting) ---
+def get_user_lang(user_id):
+    c = _conn()
+    r = c.execute("SELECT lang FROM user_lang WHERE user_id=?", (user_id,)).fetchone()
+    c.close()
+    return r["lang"] if r else "en"
+
+def set_user_lang(user_id, lang):
+    c = _conn()
+    c.execute("INSERT INTO user_lang(user_id,lang) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET lang=excluded.lang", (user_id, lang))
+    c.commit(); c.close()
 
 # --- Per-chat settings (burn alerts etc.) ---
 # Keys: burn_alerts (on/off, default OFF), burn_daily, burn_big, burn_rate (on/off)

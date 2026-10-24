@@ -6,9 +6,26 @@ AI_BASE_URL = os.getenv("AI_BASE_URL", "https://api.openai.com/v1")
 AI_MODEL = os.getenv("AI_MODEL", "gpt-4o-mini")
 # Groq quick-start: set AI_BASE_URL=https://api.groq.com/openai/v1 and AI_MODEL=llama-3.1-8b-instant
 
-async def chat(messages, temperature=0.3) -> str | None:
+def with_lang(messages, lang="en"):
+    """Append the reply-language instruction to the system message (if any).
+    Pure function — unit-testable without network. Unknown codes fall back
+    to English via lang.normalize, so a bad stored value never breaks a call."""
+    import lang as lang_mod
+    extra = lang_mod.instruction(lang)
+    if not extra:
+        return messages
+    out = [dict(m) for m in messages]
+    for m in out:
+        if m.get("role") == "system":
+            m["content"] = m["content"] + "\n" + extra
+            return out
+    out.insert(0, {"role": "system", "content": extra})
+    return out
+
+async def chat(messages, temperature=0.3, lang="en") -> str | None:
     if not AI_API_KEY:
         return None
+    messages = with_lang(messages, lang)
     try:
         async with httpx.AsyncClient(timeout=60, proxy=os.getenv('OUTBOUND_PROXY') or None) as c:
             r = await c.post(f"{AI_BASE_URL.rstrip('/')}/chat/completions",
@@ -53,7 +70,7 @@ Format exactly:
 📋 Action Items (with @name if named, or 'None')
 Be accurate, do not invent messages, contracts, or decisions not in the log. Keep it short."""
 
-async def summarize(rows, detailed=False, kb_text="") -> str:
+async def summarize(rows, detailed=False, kb_text="", lang="en") -> str:
     if not rows:
         return "No messages logged yet. I can only summarize messages sent after I joined this group."
     transcript = "\n".join(f"[{r['ts']}] {r['user_name']}: {r['text']}" for r in rows if r["text"])
@@ -62,5 +79,5 @@ async def summarize(rows, detailed=False, kb_text="") -> str:
     out = await chat([
         {"role": "system", "content": SUMMARY_SYSTEM + ("\nGive more detail per topic." if detailed else "")},
         {"role": "user", "content": f"Summarize these {len(rows)} messages:\n\n{transcript}"},
-    ])
+    ], lang=lang)
     return out or extractive_summary(rows, detailed)

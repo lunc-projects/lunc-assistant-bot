@@ -9,7 +9,7 @@ import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
-import store, ai_client, burn as burn_mod, chain
+import store, ai_client, burn as burn_mod, chain, lang as lang_mod
 from kb import kb_as_text, find_kb_answer
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -62,6 +62,7 @@ Or just @mention me in the group, or DM me
 In a group, only admins can change group settings. In DM, it's just for you.
 
 *Other*
+/language — choose your language (summaries + answers follow it)
 /help — this list
 In DM: forward / paste any long text and I'll summarize it.
 """
@@ -99,8 +100,32 @@ async def on_botstats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"People who've used me in DM (settings/catchup): {u['dm_users']}\n"
         f"Messages currently logged: {u['messages']}", parse_mode=ParseMode.MARKDOWN)
 
+def user_lang(update):
+    """The requester's language. Personal, never a group setting: one user
+    switching language never changes what anyone else sees."""
+    return store.get_user_lang(update.effective_user.id)
+
 async def on_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    lg = user_lang(update)
+    await update.message.reply_text(lang_mod.t("intro", lg), reply_markup=lang_mod.lang_keyboard())
+
+async def on_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(HELP, parse_mode=ParseMode.MARKDOWN)
+
+async def on_language(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    lg = user_lang(update)
+    await update.message.reply_text(lang_mod.t("current", lg, name=lang_mod.LABELS[lg]),
+                                    reply_markup=lang_mod.lang_keyboard())
+
+async def on_lang_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    code = (q.data or "").split(":", 1)[1] if ":" in (q.data or "") else ""
+    if code not in lang_mod.CODES:
+        await q.answer("Unknown language."); return
+    store.set_user_lang(update.effective_user.id, code)
+    await q.answer()
+    await q.edit_message_text(lang_mod.t("picked", code, name=lang_mod.LABELS[code]),
+                              reply_markup=lang_mod.lang_keyboard())
 
 async def on_summary(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     rows, detailed = parse_summary_args(ctx.args, update.effective_chat.id)
@@ -108,7 +133,7 @@ async def on_summary(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No messages logged yet — I can only summarize messages sent after I joined this group. Give it some activity, then try /summary again.")
         return
     await update.message.reply_text(f"Summarizing {len(rows)} messages…")
-    out = await ai_client.summarize(rows, detailed=detailed)
+    out = await ai_client.summarize(rows, detailed=detailed, lang=user_lang(update))
     await send_long(update, out)
     store.set_catchup(update.effective_chat.id, update.effective_user.id)
 
@@ -123,7 +148,7 @@ async def on_catchup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not rows:
         await update.message.reply_text("You're all caught up — no new messages since your last /catchup.")
         return
-    out = await ai_client.summarize(rows)
+    out = await ai_client.summarize(rows, lang=user_lang(update))
     await send_long(update, f"📬 Catchup — {len(rows)} new messages\n\n{out}")
     store.set_catchup(cid, uid)
 
@@ -134,7 +159,7 @@ async def on_tldr(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     out = await ai_client.chat([
         {"role":"system","content":"Summarize the message in 2-3 short lines. No extra commentary."},
-        {"role":"user","content": msg.text}]) or msg.text[:400]
+        {"role":"user","content": msg.text}], lang=user_lang(update)) or msg.text[:400]
     await update.message.reply_text(f"⚡ TL;DR: {out}")
 
 async def on_ask(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -143,8 +168,8 @@ async def on_ask(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Ask me something: /ask explain this proposal in simple words")
         return
     out = await ai_client.chat([
-        {"role":"system","content":"You are LUNC Assistant Bot, a standalone general AI assistant for Telegram groups. Answer clearly and concisely. Do not invent contract addresses or claim knowledge of any specific project. Trusted references you may cite: Finder (finder.terra.money/classic) for on-chain verification, LuncScan (luncscan.com) for explorer data and beginner staking/validator guides, and LUNCDash (luncdash.com) for dashboards. Terra Classic validators discuss governance and day-to-day operations in the Transparent Validator Chat on Telegram (t.me/transparentvalidatorchat)."},
-        {"role":"user","content": q}])
+        {"role":"system","content":"You are LUNC Assistant Bot, a standalone general AI assistant for Telegram groups. Answer clearly and concisely. Do not invent contract addresses or claim knowledge of any specific project. Trusted references you may cite: Finder (finder.terra.money/classic) for on-chain verification, LuncScan (luncscan.com) for explorer data and beginner staking/validator guides, LUNCDash (luncdash.com) for dashboards, and StatsBin (statsbin.com) for chain stats and upgrade countdowns. Terra Classic validators discuss governance and day-to-day operations in the Transparent Validator Chat on Telegram (t.me/transparentvalidatorchat)."},
+        {"role":"user","content": q}], lang=user_lang(update))
     if not out:
         out = "AI isn't configured yet (no AI_API_KEY). The owner can add the key in Railway and I'll answer fully."
     await send_long(update, out)
@@ -302,6 +327,7 @@ Galaxy Station wallet: https://station.terraclassic.community
 Keplr wallet: https://www.keplr.app
 LUNCDash: https://luncdash.com
 LuncScan (explorer + staking guides): https://luncscan.com
+Community stats — StatsBin (chain stats + upgrade countdown): https://statsbin.com (X: https://x.com/StatsBin)
 Governance forum: https://discuss.terra-classic.io (verify current forum in chat)
 Terra Classic docs / GitHub: https://github.com/classic-terra
 CoinGecko LUNC: https://www.coingecko.com/en/coins/terra-luna
@@ -338,7 +364,7 @@ async def on_learn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: /learn <word> — try: " + ", ".join(GLOSSARY.keys())); return
     w = " ".join(ctx.args).lower()
     if w in GLOSSARY: await update.message.reply_text(f"📖 *{w}*: {GLOSSARY[w]}", parse_mode=ParseMode.MARKDOWN); return
-    out = await ai_client.chat([{"role":"system","content":"Explain the crypto/Terra Classic term in 2-3 plain lines for a beginner. No financial advice."},{"role":"user","content":w}])
+    out = await ai_client.chat([{"role":"system","content":"Explain the crypto/Terra Classic term in 2-3 plain lines for a beginner. No financial advice."},{"role":"user","content":w}], lang=user_lang(update))
     await update.message.reply_text(out or "I don't have that one yet — try /learn quorum")
 
 # ================= GOV ALERTS (voting + proposals) =================
@@ -542,14 +568,14 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             ctx.args = q.split()
             # reuse ask logic with cleaned question: temporarily set message text path
             out = await ai_client.chat([
-                {"role":"system","content":"You are LUNC Assistant Bot, a standalone general AI assistant. Answer clearly and concisely. Trusted references you may cite: Finder (finder.terra.money/classic) for on-chain verification, LuncScan (luncscan.com) for explorer data and beginner staking/validator guides, and LUNCDash (luncdash.com) for dashboards. Terra Classic validators discuss governance and day-to-day operations in the Transparent Validator Chat on Telegram (t.me/transparentvalidatorchat)."},
-                {"role":"user","content": q}]) or "AI isn't configured yet (no AI_API_KEY)." 
+                {"role":"system","content":"You are LUNC Assistant Bot, a standalone general AI assistant. Answer clearly and concisely. Trusted references you may cite: Finder (finder.terra.money/classic) for on-chain verification, LuncScan (luncscan.com) for explorer data and beginner staking/validator guides, LUNCDash (luncdash.com) for dashboards, and StatsBin (statsbin.com) for chain stats and upgrade countdowns. Terra Classic validators discuss governance and day-to-day operations in the Transparent Validator Chat on Telegram (t.me/transparentvalidatorchat)."},
+                {"role":"user","content": q}], lang=user_lang(update)) or "AI isn't configured yet (no AI_API_KEY)." 
             await send_long(update, out)
         return
     # DM: any long text = summarize it
     if chat.type == "private" and len(text) > 600 and not text.startswith("/"):
         rows = [{"user_name": name, "text": text, "ts": int(time.time())}]
-        out = await ai_client.summarize(rows)
+        out = await ai_client.summarize(rows, lang=user_lang(update))
         await send_long(update, out)
 
 async def post_init(app: Application):
@@ -558,7 +584,7 @@ async def post_init(app: Application):
         await app.bot.set_my_short_description("Summarizes hundreds of group messages into a quick summary + AI assistant.")
         await app.bot.set_my_commands([
             ("summary","Summarize group messages"),("catchup","What you missed"),("tldr","Shrink a message (reply to it)"),
-            ("ask","Ask me anything"),("proposals","Proposals voting now"),("proposal","Proposal + tally"),("price","LUNC + USTC price"),("stats","Chain stats"),("burn","Live burn tax info"),("burnalerts","Burn notifications on/off"),("govalerts","Proposal alerts on/off"),("wallet","Public wallet lookup"),("token","CW20 token info"),("validators","Top validators"),("watchvalidator","Watch a validator"),("help","All commands")])
+            ("ask","Ask me anything"),("proposals","Proposals voting now"),("proposal","Proposal + tally"),("price","LUNC + USTC price"),("stats","Chain stats"),("burn","Live burn tax info"),("burnalerts","Burn notifications on/off"),("govalerts","Proposal alerts on/off"),("wallet","Public wallet lookup"),("token","CW20 token info"),("validators","Top validators"),("watchvalidator","Watch a validator"),("language","Choose your language"),("help","All commands")])
         # Profile photo (owner's logo) — re-applied on boot so redeploys never lose it
         try:
             from telegram import InputProfilePhotoStatic
@@ -581,7 +607,8 @@ def main():
     app = _builder.build()
     app.add_handler(CommandHandler("start", on_start))
     app.add_handler(CommandHandler("botstats", on_botstats))
-    app.add_handler(CommandHandler("help", on_start))
+    app.add_handler(CommandHandler("help", on_help))
+    app.add_handler(CommandHandler("language", on_language))
     app.add_handler(CommandHandler("summary", on_summary))
     app.add_handler(CommandHandler("catchup", on_catchup))
     app.add_handler(CommandHandler("tldr", on_tldr))
@@ -609,6 +636,7 @@ def main():
     app.add_handler(CommandHandler("settings", on_settings))
     app.add_handler(CallbackQueryHandler(on_burn_callback, pattern=r"^burn:"))
     app.add_handler(CallbackQueryHandler(on_gov_callback, pattern=r"^gov:"))
+    app.add_handler(CallbackQueryHandler(on_lang_callback, pattern=r"^lang:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
     if app.job_queue:
         app.job_queue.run_repeating(job_burn_check, interval=3600, first=120)
