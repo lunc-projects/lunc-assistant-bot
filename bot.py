@@ -9,7 +9,7 @@ import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
-import store, ai_client, burn as burn_mod, chain, lang as lang_mod, ratelimit, budget, modquiz, topics
+import store, ai_client, burn as burn_mod, chain, lang as lang_mod, ratelimit, budget, modquiz, topics, seclogic
 from kb import kb_as_text, find_kb_answer
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -76,6 +76,8 @@ Protection means: new joiners pass a short safety check in my DM before they can
 /gunban <user id> — lift a global ban · /gbans — see the ban list
 /aiban — reply to an abusive user (or /aiban <user id>): block ALL AI features for them — simple commands still work · /aiunban <user id> lifts it · /aibans lists them
 Safety rails on bans: every global ban is written to a permanent log, the owner is alerted instantly with a one-tap undo button, non-owner moderators can global-ban at most 5 people a day, and nobody but the owner can global-ban the owner, an elevated user, or an admin of a protected group. /modlog (owner only) shows the record.
+/appeal — in my DM: if you're on the global ban or AI ban list, ask the owner to review it (once a day)
+Automatic in protected groups: message flooding = delete + timed mute · the same long message posted across protected groups = deleted + muted + flagged to the owner · brand-new-looking accounts (no username, no profile photo) pass the safety check but start text-only for 24 hours · first-message links to official sites (Finder, LuncScan, Station, Keplr, Ledger) are allowed
 /mute [minutes] — reply to a member to silence them (default 60 min) · /unmute
 /blacklist add <word> — in protected groups, a message containing it is deleted and the sender removed (owner + elevated users)
 /raid on/off — anti-raid lockdown for join surges (also triggers automatically)
@@ -557,7 +559,7 @@ PRIVACY_TEXT = (
     "• *What the AI sees:* only when someone uses an AI feature (/ask, /summary, mentions, DM summaries). Then the AI service (Groq) receives the message text and usernames needed for that one answer. Simple commands (/price, /validators, …) send nothing anywhere.\n\n"
     "• *Your group's controls:* group admins run this group — including AI on/off (/aioff, /aion), alert settings, and notification choices. Usage stats are owner-only.\n\n"
     "• *The limits:* ranks allow 2 (starting), 4, or 6 AI questions a day depending on time in the community, moderators can AI-ban an abusive account from AI features only (simple commands keep working), and a hard daily token budget (200,000/day) means the AI quota can't be drained by spam — the worst case is AI pausing until midnight UTC.\n\n"
-    "• *Group protection (opt-in):* in groups whose admins registered with /protect and the owner approved, new joiners pass a short safety check before they can post, accounts on the network's global scam-ban list are removed on sight, and a member whose first message contains a link is removed. Moderators can also mute members, keep a word blacklist, trigger anti-raid lockdowns during join surges, and switch on timed safety reminders. Protected-group admins, owner-appointed elevated users, and the owner control the ban list — with rails on that power: every global ban is written to a permanent moderation log, the owner is alerted instantly with a one-tap undo, non-owner moderators are limited to 5 global bans a day, and only the owner can global-ban an elevated user or another protected group's admin.\n\n"
+    "• *Group protection (opt-in):* in groups whose admins registered with /protect and the owner approved, new joiners pass a short safety check before they can post, accounts on the network's global scam-ban list are removed on sight, and a member whose first message contains a link is removed. Moderators can also mute members, keep a word blacklist, trigger anti-raid lockdowns during join surges, and switch on timed safety reminders. Protected-group admins, owner-appointed elevated users, and the owner control the ban list — with rails on that power: every global ban is written to a permanent moderation log, the owner is alerted instantly with a one-tap undo, non-owner moderators are limited to 5 global bans a day, and only the owner can global-ban an elevated user or another protected group's admin. Automatic anti-spam also mutes message flooding, flags the same long message posted across protected groups, and starts brand-new-looking accounts text-only for 24 hours; banned users can appeal to the owner once a day with /appeal.\n\n"
     "• *Don't take our word for it:* the bot's code is public — read exactly what it does: github.com/lunc-projects/lunc-assistant-bot")
 
 async def on_privacy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -591,6 +593,22 @@ async def on_aioff(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 CAPTCHA_MINUTES = 10
 GBAN_DAILY_LIMIT_NONOWNER = 5  # global bans per UTC day for non-owner moderators (owner: no limit)
+
+# Security round 2 (2026-10-25): automatic anti-spam for protected
+# groups — flood control, cross-group repeat detection, fresh-account
+# holds. All state is in-memory except the fresh holds (they must
+# survive the 24h they span, so they live in the store).
+FLOOD_WINDOW = 10          # seconds
+FLOOD_MAX = 6              # messages allowed inside the window; the 7th trips
+FLOOD_MUTE_MINUTES = 10    # first flood
+FLOOD_MUTE2_MINUTES = 60   # repeat flood within the hour
+FLOOD_TIMES = {}           # (chat_id, user_id) -> [ts]
+FLOOD_OFFENSES = {}        # (chat_id, user_id) -> [count, last_ts]
+REPEAT_WINDOW = 900        # same long message in 2+ protected chats within 15 min
+REPEAT_SEEN = {}           # fingerprint -> {"chats": {chat_id: ts}, "ts": first_ts}
+REPEAT_MUTE_MINUTES = 30
+FRESH_HOLD_HOURS = 24
+TEXT_ONLY_PERMS = ChatPermissions(can_send_messages=True, can_invite_users=True)
 FULL_PERMS = ChatPermissions(
     can_send_messages=True, can_send_audios=True, can_send_documents=True,
     can_send_photos=True, can_send_videos=True, can_send_video_notes=True,
@@ -887,7 +905,7 @@ async def on_modlog(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lines = ["*Moderation log — latest first*"]
     for r in rows:
         when = datetime.datetime.fromtimestamp(r["ts"], datetime.timezone.utc).strftime("%b %d %H:%M UTC")
-        lines.append(f"• {when} — {r['action']}: user {r['target']} by {r['actor']}" + (f" — {r['detail']}" if r["detail"] else ""))
+        lines.append(f"• {when} — {r['action']}" + (f": user {r['target']}" if r["target"] else "") + f" by {r['actor'] or 'auto'}" + (f" — {r['detail']}" if r["detail"] else ""))
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
 async def on_modundo_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -904,6 +922,51 @@ async def on_modundo_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await q.answer("Ban lifted ✅")
     try: await q.edit_message_text((q.message.text or "") + f"\n\n↩️ Undone by you — user {target} unbanned in {ok} group(s)" + (f" ({fail} failed)" if fail else "") + ".")
     except Exception: pass
+
+async def on_aiundo_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not _is_owner(q.from_user.id):
+        await q.answer("Owner only.", show_alert=True); return
+    try: target = int((q.data or "").split(":")[1])
+    except Exception:
+        await q.answer("Bad button."); return
+    if not store.ai_ban_remove(target):
+        await q.answer("That AI ban is already gone.", show_alert=True); return
+    store.mod_log_add(q.from_user.id, "aiunban", target, None, "owner button (appeal/alert)")
+    await q.answer("AI ban lifted ✅")
+    try: await q.edit_message_text((q.message.text or "") + f"\n\n↩️ Undone by you — AI ban lifted for user {target}.")
+    except Exception: pass
+
+async def on_appeal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Ban appeal: a user on the global ban list or AI ban list can ask
+    the owner for a review, in DM, at most once a day. The owner gets
+    the ban record plus one-tap lift buttons."""
+    chat, user = update.effective_chat, update.effective_user
+    if chat.type != "private":
+        await update.message.reply_text("Appeals are private — DM me and send /appeal there."); return
+    g = store.gban_get(user.id)
+    a = store.ai_ban_get(user.id)
+    if not g and not a:
+        await update.message.reply_text("You have no ban on record with me — nothing to appeal. (This covers only this bot's global ban list and AI ban list.)"); return
+    last = store.appeal_last(user.id)
+    if last and int(time.time()) - last["ts"] < 86400:
+        await update.message.reply_text("You've already appealed in the last 24 hours — the owner has it. One appeal a day keeps it readable."); return
+    text = " ".join(ctx.args or []).strip()
+    kinds = ("global ban" if g else "") + (" + " if g and a else "") + ("AI ban" if a else "")
+    store.appeal_record(user.id, kinds)
+    store.mod_log_add(user.id, "appeal", user.id, None, kinds)
+    await update.message.reply_text("✅ Appeal sent to the owner, with the ban record attached. If they lift it, you'll see the bot working for you again — no need to send more.")
+    if OWNER_ID:
+        rows = []
+        detail = []
+        if g:
+            rows.append([InlineKeyboardButton("↩️ Lift the global ban", callback_data=f"modundo:{user.id}")])
+            detail.append(f"Global ban: {g['reason'] or '(no reason given)'} · placed by {g['banned_by']}")
+        if a:
+            rows.append([InlineKeyboardButton("↩️ Lift the AI ban", callback_data=f"aiundo:{user.id}")])
+            detail.append(f"AI ban: {a['reason'] or '(no reason given)'} · placed by {a['banned_by']}")
+        try: await ctx.bot.send_message(OWNER_ID, f"📩 Ban appeal ({kinds})\nUser: {user.id} ({user.full_name})\n" + "\n".join(detail) + f"\nTheir words: {text[:500] if text else '(no message)'}", reply_markup=InlineKeyboardMarkup(rows) if rows else None)
+        except Exception: pass
 
 async def on_elevate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _owner_only(update): return
@@ -977,7 +1040,12 @@ async def on_new_members(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await ctx.bot.unban_chat_member(chat.id, m.id, only_if_banned=True)
             except Exception: pass
             continue
-        if store.member_is_verified(chat.id, m.id): continue
+        if store.member_is_verified(chat.id, m.id):
+            fh = store.fresh_get(chat.id, m.id)
+            if fh and fh["until_ts"] > now:
+                try: await ctx.bot.restrict_chat_member(chat.id, m.id, permissions=TEXT_ONLY_PERMS)
+                except Exception: pass
+            continue
         if await _is_group_admin(ctx, chat.id, m.id):
             store.member_verify(chat.id, m.id); continue
         try:
@@ -1045,6 +1113,26 @@ async def on_captcha_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     QUIZ.pop(uid, None)
     store.captcha_clear(chat_id, uid)
     store.member_verify(chat_id, uid)
+    # Fresh-account hold: no username AND no profile photo looks like a
+    # throwaway account. They can chat right away, but text-only (no
+    # media, no link previews — the scam vectors) for the first 24h;
+    # job_fresh_sweep lifts it automatically. If the photo check can't
+    # be made, we don't hold on a guess.
+    fresh = False
+    if not q.from_user.username:
+        try:
+            photos = await ctx.bot.get_user_profile_photos(uid, limit=1)
+            fresh = seclogic.fresh_looking(False, photos.total_count)
+        except Exception:
+            fresh = False
+    if fresh:
+        store.fresh_add(chat_id, uid, int(time.time()) + FRESH_HOLD_HOURS * 3600)
+        try: await ctx.bot.restrict_chat_member(chat_id, uid, permissions=TEXT_ONLY_PERMS)
+        except Exception: pass
+        await q.answer("✅ You passed!")
+        try: await q.edit_message_text("✅ You passed the safety check — you can chat in the group now. One extra for brand-new-looking accounts (no username, no profile photo): you're text-only for the first 24 hours — no photos, videos, or link previews — then full access opens automatically. Stay safe: no real admin will ever DM you asking for a seed phrase or a wallet approval.")
+        except Exception: pass
+        return
     try: await ctx.bot.restrict_chat_member(chat_id, uid, permissions=FULL_PERMS)
     except Exception: pass
     await q.answer("✅ You passed!")
@@ -1059,6 +1147,13 @@ async def job_captcha_sweep(ctx: ContextTypes.DEFAULT_TYPE):
         except Exception: pass
         store.captcha_clear(row["chat_id"], row["user_id"])
         QUIZ.pop(row["user_id"], None)
+
+async def job_fresh_sweep(ctx: ContextTypes.DEFAULT_TYPE):
+    """Lift fresh-account holds as they expire (full permissions back)."""
+    for row in store.fresh_due(int(time.time())):
+        try: await ctx.bot.restrict_chat_member(row["chat_id"], row["user_id"], permissions=FULL_PERMS)
+        except Exception: pass
+        store.fresh_remove(row["chat_id"], row["user_id"])
 
 # --- Phase 2 moderation: mute, blacklist, anti-raid, alerts, stats ---
 
@@ -1710,11 +1805,63 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if chat.type in ("group", "supergroup") and not user.is_bot and store.mod_is_protected(chat.id):
         first = store.first_msg_mark(chat.id, user.id)
         if not _is_owner(user.id) and not store.is_elevated(user.id):
+            _admin = None
+            async def _exempt_admin():
+                nonlocal _admin
+                if _admin is None:
+                    _admin = await _is_group_admin(ctx, chat.id, user.id)
+                return _admin
+            now = int(time.time())
+            # Flood control: a burst of messages inside a few seconds is
+            # a spam run, not conversation. Delete + timed mute; a repeat
+            # within the hour earns the longer mute.
+            fkey = (chat.id, user.id)
+            ft = [t for t in FLOOD_TIMES.get(fkey, []) if now - t < FLOOD_WINDOW]
+            ft.append(now); FLOOD_TIMES[fkey] = ft
+            if len(ft) > FLOOD_MAX and not await _exempt_admin():
+                FLOOD_TIMES[fkey] = []
+                off = FLOOD_OFFENSES.get(fkey)
+                count = (off[0] + 1) if off and now - off[1] < 3600 else 1
+                FLOOD_OFFENSES[fkey] = [count, now]
+                minutes = FLOOD_MUTE2_MINUTES if count > 1 else FLOOD_MUTE_MINUTES
+                try: await update.message.delete()
+                except Exception: pass
+                until = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=minutes)
+                try: await ctx.bot.restrict_chat_member(chat.id, user.id, permissions=NO_PERMS, until_date=until)
+                except Exception: pass
+                store.mod_log_add(0, "flood mute", user.id, chat.id, f"{minutes} min, offense {count}")
+                try: await ctx.bot.send_message(chat.id, f"🔇 A member was muted for {minutes} minutes for flooding (anti-spam protection).")
+                except Exception: pass
+                return
+            # Cross-group repeat: the same long message landing in a
+            # second protected group within minutes is the classic
+            # scam-broadcast pattern. Delete + mute here, flag the owner.
+            fp = seclogic.fingerprint(text)
+            if fp and not await _exempt_admin():
+                for k in [k for k, v in REPEAT_SEEN.items() if now - v["ts"] > REPEAT_WINDOW]:
+                    REPEAT_SEEN.pop(k, None)
+                seen = REPEAT_SEEN.setdefault(fp, {"chats": {}, "ts": now})
+                others = [c for c in seen["chats"] if c != chat.id]
+                seen["chats"][chat.id] = now
+                if others:
+                    try: await update.message.delete()
+                    except Exception: pass
+                    until = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=REPEAT_MUTE_MINUTES)
+                    try: await ctx.bot.restrict_chat_member(chat.id, user.id, permissions=NO_PERMS, until_date=until)
+                    except Exception: pass
+                    store.mod_log_add(0, "repeat flag", user.id, chat.id, "same long message in 2+ protected groups")
+                    if OWNER_ID:
+                        try: await ctx.bot.send_message(OWNER_ID, f"🚩 Cross-group repeat flagged\nUser: {user.id} ({name})\nPosted the same long message in chat {others[0]} and now in chat {chat.id} — deleted + muted {REPEAT_MUTE_MINUTES} min here.\nText: {text[:200]}")
+                        except Exception: pass
+                    try: await ctx.bot.send_message(chat.id, f"🚫 A member was muted: the same long message was just posted across protected groups (a common scam pattern).")
+                    except Exception: pass
+                    return
             low = text.lower()
             bad = next((w for w in store.blacklist_all() if w in low), None)
             has_link = any(e.type in ("url", "text_link") for e in (update.message.entities or [])) or bool(LINK_RE.search(text))
-            if bad or (first and has_link):
-                if not await _is_group_admin(ctx, chat.id, user.id):
+            # First-message links to allowlisted official domains are fine.
+            if bad or (first and has_link and not seclogic.all_links_allowlisted(text)):
+                if not await _exempt_admin():
                     try: await update.message.delete()
                     except Exception: pass
                     try:
@@ -1796,7 +1943,7 @@ async def post_init(app: Application):
         await app.bot.set_my_short_description("Summarizes hundreds of group messages into a quick summary + AI assistant.")
         await app.bot.set_my_commands([
             ("summary","Summarize group messages"),("catchup","What you missed"),("tldr","Shrink a message (reply to it)"),
-            ("ask","Ask me anything"),("proposals","Proposals voting now"),("proposal","Proposal + tally"),("price","LUNC + USTC price"),("stats","Chain stats"),("burn","Live burn tax info"),("burnalerts","Burn notifications on/off"),("govalerts","Proposal alerts on/off"),("wallet","Public wallet lookup"),("token","CW20 token info"),("validators","Top validators"),("watchvalidator","Watch a validator"),("rank","Your rank in this chat"),("language","Choose your language"),("privacy","Privacy & security info"),("protect","Request scam protection (group admins)"),("aiban","AI-ban a user (moderators)"),("rules","This group's rules"),("menu","Buttons menu — no typing"),("panel","Admin panel (group admins)"),("help","All commands")])
+            ("ask","Ask me anything"),("proposals","Proposals voting now"),("proposal","Proposal + tally"),("price","LUNC + USTC price"),("stats","Chain stats"),("burn","Live burn tax info"),("burnalerts","Burn notifications on/off"),("govalerts","Proposal alerts on/off"),("wallet","Public wallet lookup"),("token","CW20 token info"),("validators","Top validators"),("watchvalidator","Watch a validator"),("rank","Your rank in this chat"),("language","Choose your language"),("privacy","Privacy & security info"),("protect","Request scam protection (group admins)"),("aiban","AI-ban a user (moderators)"),("appeal","Appeal a ban (in DM)"),("rules","This group's rules"),("menu","Buttons menu — no typing"),("panel","Admin panel (group admins)"),("help","All commands")])
         # Profile photo (owner's logo) — re-applied on boot so redeploys never lose it
         try:
             from telegram import InputProfilePhotoStatic
@@ -1864,6 +2011,7 @@ def main():
     app.add_handler(CommandHandler("aiunban", on_aiunban))
     app.add_handler(CommandHandler("aibans", on_aibans))
     app.add_handler(CommandHandler("modlog", on_modlog))
+    app.add_handler(CommandHandler("appeal", on_appeal))
     app.add_handler(CommandHandler("elevate", on_elevate))
     app.add_handler(CommandHandler("unelevate", on_unelevate))
     app.add_handler(CommandHandler("elevated", on_elevated))
@@ -1888,6 +2036,7 @@ def main():
     app.add_handler(CallbackQueryHandler(on_panel_callback, pattern=r"^panel:"))
     app.add_handler(CallbackQueryHandler(on_mod_callback, pattern=r"^mod:"))
     app.add_handler(CallbackQueryHandler(on_modundo_callback, pattern=r"^modundo:"))
+    app.add_handler(CallbackQueryHandler(on_aiundo_callback, pattern=r"^aiundo:"))
     app.add_handler(CallbackQueryHandler(on_captcha_callback, pattern=r"^cap:"))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_new_members))
     app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_left_member))
@@ -1900,6 +2049,7 @@ def main():
         app.job_queue.run_repeating(job_gov_check, interval=1800, first=180)
         app.job_queue.run_repeating(job_validator_check, interval=3600, first=240)
         app.job_queue.run_repeating(job_captcha_sweep, interval=60, first=30)
+        app.job_queue.run_repeating(job_fresh_sweep, interval=600, first=90)
         app.job_queue.run_repeating(job_scam_alerts, interval=1800, first=300)
         import datetime as _dt
         app.job_queue.run_daily(job_burn_daily, time=_dt.time(hour=1, minute=0))  # ~9pm ET (UTC-4), shifts 1h in winter

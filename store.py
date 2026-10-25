@@ -276,6 +276,11 @@ def _ensure_mod_tables(c):
     c.execute("""CREATE TABLE IF NOT EXISTS mod_log(
         id INTEGER PRIMARY KEY AUTOINCREMENT, actor INTEGER, action TEXT,
         target INTEGER, chat_id INTEGER, detail TEXT, ts INTEGER)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS fresh_holds(
+        chat_id INTEGER, user_id INTEGER, until_ts INTEGER,
+        PRIMARY KEY(chat_id, user_id))""")
+    c.execute("""CREATE TABLE IF NOT EXISTS appeals(
+        user_id INTEGER PRIMARY KEY, kind TEXT, ts INTEGER)""")
     c.execute("""CREATE TABLE IF NOT EXISTS faq(
         chat_id INTEGER, question TEXT, answer TEXT, added_by INTEGER, ts INTEGER,
         PRIMARY KEY(chat_id, question))""")
@@ -458,6 +463,43 @@ def mod_action_count(actor, action, since_ts):
     n = c.execute("SELECT COUNT(*) FROM mod_log WHERE actor=? AND action=? AND ts>=?",
                   (actor, action, int(since_ts))).fetchone()[0]
     c.close(); return n
+
+# --- Fresh-account holds + ban appeals (2026-10-25 security round 2) ---
+
+def fresh_add(chat_id, user_id, until_ts):
+    c = _conn()
+    c.execute("""INSERT INTO fresh_holds(chat_id, user_id, until_ts) VALUES(?, ?, ?)
+                 ON CONFLICT(chat_id, user_id) DO UPDATE SET until_ts=excluded.until_ts""",
+              (chat_id, user_id, int(until_ts)))
+    c.commit(); c.close()
+
+def fresh_get(chat_id, user_id):
+    c = _conn()
+    r = c.execute("SELECT * FROM fresh_holds WHERE chat_id=? AND user_id=?",
+                  (chat_id, user_id)).fetchone()
+    c.close(); return r
+
+def fresh_remove(chat_id, user_id):
+    c = _conn()
+    cur = c.execute("DELETE FROM fresh_holds WHERE chat_id=? AND user_id=?", (chat_id, user_id))
+    c.commit(); n = cur.rowcount; c.close(); return n
+
+def fresh_due(now_ts):
+    c = _conn()
+    rows = c.execute("SELECT * FROM fresh_holds WHERE until_ts<=?", (int(now_ts),)).fetchall()
+    c.close(); return rows
+
+def appeal_last(user_id):
+    c = _conn()
+    r = c.execute("SELECT * FROM appeals WHERE user_id=?", (user_id,)).fetchone()
+    c.close(); return r
+
+def appeal_record(user_id, kind):
+    c = _conn()
+    c.execute("""INSERT INTO appeals(user_id, kind, ts) VALUES(?, ?, ?)
+                 ON CONFLICT(user_id) DO UPDATE SET kind=excluded.kind, ts=excluded.ts""",
+              (user_id, kind, int(_time.time())))
+    c.commit(); c.close()
 
 # --- Phase 2 moderation (2026-10-25): blacklist, scam alerts, stats ---
 
