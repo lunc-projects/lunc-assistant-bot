@@ -15,7 +15,7 @@ from kb import kb_as_text, find_kb_answer
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 OWNER_ID = int(os.getenv("OWNER_TELEGRAM_ID", "0") or 0)
 # AI kill switch — True means AI features are live, governed by rank,
-# hourly caps, and the daily token pot (budget.py: 200,000/day, the Groq
+# daily caps, and the daily token pot (budget.py: 200,000/day, the Groq
 # free allowance). Flip to False to disable ALL AI again. Simple (non-AI)
 # commands keep working either way.
 AI_ENABLED = True
@@ -59,7 +59,7 @@ Or just @mention me in the group, or DM me
 
 *Ranks (AI access)*
 /rank — your rank + what it unlocks
-Rank 0: new here, no AI queries yet · Rank 1: regular, standard caps · Rank 2: trusted, higher caps
+Rank 0: new here, no AI queries yet · Rank 1: regular, 10 AI queries/day · Rank 2: trusted, 25 AI queries/day
 Rank is earned by chatting on distinct days (not message count). Owner: /rankset, /rankclear (in groups)
 
 *Daily AI pot*
@@ -144,9 +144,9 @@ async def on_rank(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if rank == 0:
         unlocks = "AI queries are locked — chat in a group on a few different days to reach rank 1."
     elif rank == 1:
-        unlocks = "AI queries unlocked (standard hourly caps)."
+        unlocks = "AI queries unlocked (standard daily cap: 10 per day)."
     else:
-        unlocks = "AI queries unlocked (higher hourly caps)."
+        unlocks = "AI queries unlocked (higher daily cap: 25 per day)."
     extra = " (set by the owner)" if override is not None else ""
     await update.message.reply_text(
         f"🎖 Your rank {scope}: {rank}{extra}\n"
@@ -223,7 +223,7 @@ RANK0_NOTE = ("🔰 You're rank 0, so AI queries are locked for now. "
               "no AI call was spent on this message.")
 
 async def ai_guard(update):
-    """AI gate: kill switch, then rank, then hourly cap. False = message already sent."""
+    """AI gate: kill switch, then rank, then daily cap. False = message already sent."""
     if not AI_ENABLED:
         await update.message.reply_text(
             "🤖 AI features are temporarily disabled while we review security. "
@@ -241,7 +241,7 @@ async def ai_guard(update):
     if ratelimit.allowed_for_rank(user_id, chat.id, OWNER_ID, rank=rank):
         return True
     await update.message.reply_text(
-        "⏳ You've hit the hourly AI limit — take a breather and try again in a bit. (This cap protects the bot's AI quota from spam.)")
+        "⏳ You've hit your daily AI limit — it resets at midnight UTC. (This cap protects the bot's AI quota from spam.)")
     return False
 
 FALLBACK_NOTE = "📋 Basic summary (AI is off — no AI used):\n\n"

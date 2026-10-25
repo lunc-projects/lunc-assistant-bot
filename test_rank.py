@@ -1,5 +1,5 @@
 """Rank tests for the LUNC Assistant Bot: earned days, thresholds, manual
-override, DM (anywhere) rank, and rank-aware hourly caps.
+override, DM (anywhere) rank, and rank-aware daily caps.
 
 Runs against a temp SQLite DB (DB_PATH env set before importing store).
 """
@@ -71,15 +71,15 @@ check(store._rank_from_days(30) == 2, "30 days = rank 2")
 
 print("== rank-aware caps ==")
 ratelimit.reset()
-ok = all(ratelimit.allowed_for_rank(5, -100, 0, rank=1, now=1000.0 + i) for i in range(20))
-check(ok, "rank 1 allows 20/hr")
-check(not ratelimit.allowed_for_rank(5, -100, 0, rank=1, now=1000.0 + 21),
-      "rank 1 blocks 21st/hr")
+ok = all(ratelimit.allowed_for_rank(5, -100, 0, rank=1, now=1000.0 + i) for i in range(10))
+check(ok, "rank 1 allows 10/day")
+check(not ratelimit.allowed_for_rank(5, -100, 0, rank=1, now=1000.0 + 11),
+      "rank 1 blocks 11th/day")
 ratelimit.reset()
-ok = all(ratelimit.allowed_for_rank(5, -100, 0, rank=2, now=1000.0 + i) for i in range(50))
-check(ok, "rank 2 allows 50/hr")
-check(not ratelimit.allowed_for_rank(5, -100, 0, rank=2, now=1000.0 + 51),
-      "rank 2 blocks 51st/hr")
+ok = all(ratelimit.allowed_for_rank(5, -100, 0, rank=2, now=1000.0 + i) for i in range(25))
+check(ok, "rank 2 allows 25/day")
+check(not ratelimit.allowed_for_rank(5, -100, 0, rank=2, now=1000.0 + 26),
+      "rank 2 blocks 26th/day")
 ratelimit.reset()
 check(ratelimit.allowed(5, -100, 0, now=2000.0), "legacy allowed() still works (rank 1 caps)")
 ratelimit.reset()

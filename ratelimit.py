@@ -1,14 +1,16 @@
-"""Hourly caps on AI calls — protects the bot's Groq quota from spam.
+"""Daily caps on AI calls — protects the bot's Groq quota from spam.
 
 Why this exists: anyone who can reach the bot (a group member, or any
 Telegram user via DM) can trigger an AI call, and every call spends the
-owner's Groq tokens. Without a cap, one person hammering /ask, mentions,
-or long DM pastes could burn the whole daily allowance.
+owner's Groq tokens. These caps bound how much any one user — or one
+busy group — can spend in a day.
 
-Rules:
-- Per user: 20 AI calls per rolling hour.
-- Per chat: 100 AI calls per rolling hour (so one busy group can't hog
-  the quota either).
+Rules (owner decision 2026-10-25: daily, not hourly, and halved from
+the original hourly numbers):
+- Per user per UTC day: rank 1 = 10 AI calls, rank 2 = 25.
+- Per chat per UTC day: rank 1 = 50 AI calls, rank 2 = 100.
+- "Day" is the UTC calendar day — the same reset as the daily token
+  pot (budget.py) and Groq's own quota: counters reset at midnight UTC.
 - The owner (OWNER_TELEGRAM_ID) is exempt.
 - In-memory only: a redeploy resets the counters, which is fine for
   rate limiting and matches this bot's ephemeral design.
@@ -16,27 +18,38 @@ Rules:
 """
 
 import time
-from collections import deque
+from datetime import datetime, timezone
 
-USER_PER_HOUR = 20
-CHAT_PER_HOUR = 100
-WINDOW = 3600
+USER_PER_DAY = 10
+CHAT_PER_DAY = 50
 
-# Hourly caps by rank: (per-user, per-chat). Rank 0 never reaches this
+# Daily caps by rank: (per-user, per-chat). Rank 0 never reaches this
 # function — the rank gate in ai_guard blocks rank 0 before any cap check.
-RANK_CAPS = {1: (20, 100), 2: (50, 200)}
+RANK_CAPS = {1: (10, 50), 2: (25, 100)}
 
-_user_calls: dict[int, deque] = {}
-_chat_calls: dict[int, deque] = {}
+_user_counts: dict[int, list] = {}  # user_id -> [utc_day, count]
+_chat_counts: dict[int, list] = {}  # chat_id -> [utc_day, count]
 
 
-def _prune(q, now):
-    while q and q[0] <= now - WINDOW:
-        q.popleft()
+def _utc_day(now):
+    return datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%d")
+
+
+def _count(store, key, day):
+    entry = store.get(key)
+    return entry[1] if entry is not None and entry[0] == day else 0
+
+
+def _bump(store, key, day):
+    entry = store.get(key)
+    if entry is None or entry[0] != day:
+        store[key] = [day, 1]
+    else:
+        entry[1] += 1
 
 
 def allowed_for_rank(user_id, chat_id, owner_id=0, rank=1, now=None):
-    """True if this AI call fits the rank's caps; records the call when allowed.
+    """True if this AI call fits the rank's daily caps; records it when allowed.
 
     Synchronous on purpose: check + record happen with no await between
     them, so two concurrent handlers can't both slip past the cap.
@@ -44,15 +57,14 @@ def allowed_for_rank(user_id, chat_id, owner_id=0, rank=1, now=None):
     if owner_id and user_id == owner_id:
         return True
     now = time.time() if now is None else now
+    day = _utc_day(now)
     user_cap, chat_cap = RANK_CAPS.get(rank, RANK_CAPS[1])
-    uq = _user_calls.setdefault(user_id, deque())
-    cq = _chat_calls.setdefault(chat_id, deque())
-    _prune(uq, now)
-    _prune(cq, now)
-    if len(uq) >= user_cap or len(cq) >= chat_cap:
+    if _count(_user_counts, user_id, day) >= user_cap:
         return False
-    uq.append(now)
-    cq.append(now)
+    if _count(_chat_counts, chat_id, day) >= chat_cap:
+        return False
+    _bump(_user_counts, user_id, day)
+    _bump(_chat_counts, chat_id, day)
     return True
 
 
@@ -62,5 +74,5 @@ def allowed(user_id, chat_id, owner_id=0, now=None):
 
 
 def reset():
-    _user_calls.clear()
-    _chat_calls.clear()
+    _user_counts.clear()
+    _chat_counts.clear()

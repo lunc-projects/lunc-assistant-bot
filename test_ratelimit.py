@@ -1,8 +1,14 @@
-"""Unit tests for ratelimit.py — no network, no Telegram, no database."""
+"""Unit tests for ratelimit.py — no network, no Telegram, no database.
+
+Caps are per UTC day (owner decision 2026-10-25: daily, not hourly).
+Timestamps: 1000.0 = 1970-01-01 00:16:40 UTC; +86400s = the next UTC day.
+"""
 
 import ratelimit
 
 OWNER = 999
+DAY1 = 1000.0
+DAY2 = DAY1 + 86400
 
 
 def fresh():
@@ -11,53 +17,53 @@ def fresh():
 
 def test_user_cap():
     fresh()
-    for _ in range(ratelimit.USER_PER_HOUR):
-        assert ratelimit.allowed(1, -100, OWNER) is True
-    assert ratelimit.allowed(1, -100, OWNER) is False
+    for _ in range(ratelimit.USER_PER_DAY):
+        assert ratelimit.allowed(1, -100, OWNER, now=DAY1) is True
+    assert ratelimit.allowed(1, -100, OWNER, now=DAY1) is False
 
 
 def test_blocked_call_consumes_nothing():
     fresh()
-    for _ in range(ratelimit.USER_PER_HOUR):
-        ratelimit.allowed(1, -100, OWNER, now=1000)
-    assert ratelimit.allowed(1, -100, OWNER, now=1000) is False
-    # Still blocked (count unchanged), then allowed once the window passes.
-    assert ratelimit.allowed(1, -100, OWNER, now=1000) is False
-    assert ratelimit.allowed(1, -100, OWNER, now=1000 + 3601) is True
+    for _ in range(ratelimit.USER_PER_DAY):
+        ratelimit.allowed(1, -100, OWNER, now=DAY1)
+    assert ratelimit.allowed(1, -100, OWNER, now=DAY1) is False
+    # Still blocked later the SAME day (count unchanged)...
+    assert ratelimit.allowed(1, -100, OWNER, now=DAY1 + 3600) is False
+    # ...and allowed again on the next UTC day.
+    assert ratelimit.allowed(1, -100, OWNER, now=DAY2) is True
 
 
 def test_owner_exempt():
     fresh()
-    for _ in range(ratelimit.USER_PER_HOUR + 50):
-        assert ratelimit.allowed(OWNER, -100, OWNER) is True
+    for _ in range(ratelimit.USER_PER_DAY + 50):
+        assert ratelimit.allowed(OWNER, -100, OWNER, now=DAY1) is True
 
 
 def test_users_independent():
     fresh()
-    for _ in range(ratelimit.USER_PER_HOUR):
-        ratelimit.allowed(1, -100, OWNER)
-    assert ratelimit.allowed(1, -100, OWNER) is False
-    assert ratelimit.allowed(2, -100, OWNER) is True
+    for _ in range(ratelimit.USER_PER_DAY):
+        ratelimit.allowed(1, -100, OWNER, now=DAY1)
+    assert ratelimit.allowed(1, -100, OWNER, now=DAY1) is False
+    assert ratelimit.allowed(2, -100, OWNER, now=DAY1) is True
 
 
 def test_chat_cap():
     fresh()
-    for u in range(ratelimit.CHAT_PER_HOUR):
-        assert ratelimit.allowed(1000 + u, -100, OWNER) is True
-    assert ratelimit.allowed(9999, -100, OWNER) is False
+    for u in range(ratelimit.CHAT_PER_DAY):
+        assert ratelimit.allowed(1000 + u, -100, OWNER, now=DAY1) is True
+    assert ratelimit.allowed(9999, -100, OWNER, now=DAY1) is False
     # A different chat is unaffected.
-    assert ratelimit.allowed(9999, -200, OWNER) is True
+    assert ratelimit.allowed(9999, -200, OWNER, now=DAY1) is True
+    # The capped chat resets on the next UTC day.
+    assert ratelimit.allowed(9999, -100, OWNER, now=DAY2) is True
 
 
-def test_window_expiry():
+def test_rank_caps():
     fresh()
-    assert ratelimit.allowed(1, -100, OWNER, now=1000) is True
-    # 3600s later the old call has expired: a fresh call fits again even
-    # after filling the cap at the old timestamp.
-    for _ in range(ratelimit.USER_PER_HOUR - 1):
-        ratelimit.allowed(1, -100, OWNER, now=1000)
-    assert ratelimit.allowed(1, -100, OWNER, now=1000) is False
-    assert ratelimit.allowed(1, -100, OWNER, now=1000 + 3601) is True
+    for _ in range(25):
+        assert ratelimit.allowed_for_rank(7, -300, OWNER, rank=2, now=DAY1) is True
+    assert ratelimit.allowed_for_rank(7, -300, OWNER, rank=2, now=DAY1) is False
+    assert ratelimit.allowed_for_rank(7, -300, OWNER, rank=2, now=DAY2) is True
 
 
 if __name__ == "__main__":
