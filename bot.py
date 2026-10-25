@@ -9,7 +9,7 @@ import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
-import store, ai_client, burn as burn_mod, chain, lang as lang_mod, ratelimit, budget, modquiz, topics, seclogic
+import store, ai_client, burn as burn_mod, chain, lang as lang_mod, ratelimit, budget, modquiz, topics, seclogic, alerts as alerts_mod
 from kb import kb_as_text, find_kb_answer
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -1937,6 +1937,39 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         out = await ai_client.summarize(rows, lang=user_lang(update))
         await send_long(update, out)
 
+# --- Owner issue alerts (2026-10-25): anything that goes wrong in a
+# handler or background job DMs the owner, throttled (same problem at
+# most once an hour, max 6 alerts an hour) so a repeating failure
+# can't spam him. Honest limit: if the whole process dies (Railway
+# outage), the bot can't report its own death — that's an outside
+# watchdog's job, like the Garuda bot has.
+ALERTS = alerts_mod.AlertThrottler()
+
+async def _alert_owner(bot, where, err):
+    if not OWNER_ID: return
+    key = f"{where}:{type(err).__name__}"
+    if not ALERTS.allow(key, int(time.time())): return
+    when = datetime.datetime.now(datetime.timezone.utc).strftime("%H:%M UTC")
+    try:
+        await bot.send_message(OWNER_ID, f"⚠️ Bot issue — {where}\n{type(err).__name__}: {str(err)[:300]}\nTime: {when}\nThe bot is still running — this is an alert, not a crash report. The same problem won't re-alert for an hour.")
+    except Exception: pass
+
+async def on_error(update, ctx: ContextTypes.DEFAULT_TYPE):
+    err = ctx.error
+    if err is None: return
+    where = "a background job or handler"
+    try:
+        if update is not None and getattr(update, "callback_query", None):
+            where = f"button tap '{(update.callback_query.data or '')[:40]}'"
+        elif update is not None and update.effective_message and update.effective_message.text:
+            where = f"message '{update.effective_message.text[:40]}'"
+        elif ctx.job is not None:
+            where = f"background job '{ctx.job.name or 'unnamed'}'"
+    except Exception: pass
+    print(f"ERROR in {where}: {type(err).__name__}: {err}")
+    try: await _alert_owner(ctx.bot, where, err)
+    except Exception: pass
+
 async def post_init(app: Application):
     try:
         await app.bot.set_my_description("LUNC Assistant Bot — I summarize busy group chats into a quick TL;DR and answer questions. Use /summary, /catchup, /ask in a group, or DM me a long text to summarize.")
@@ -1954,6 +1987,8 @@ async def post_init(app: Application):
         except Exception as e:
             print(f"profile photo: {e}")
         print("LUNC Assistant Bot: description + commands set")
+        if AI_ENABLED and not getattr(ai_client, "AI_API_KEY", ""):
+            await _alert_owner(app.bot, "startup check", RuntimeError("AI is ON but AI_API_KEY is not set in Railway — AI features will answer 'not configured' until the key is added."))
     except Exception as e:
         print(f"post_init: {e}")
 
@@ -1964,6 +1999,7 @@ def main():
     _proxy = os.getenv("OUTBOUND_PROXY")
     if _proxy: _builder = _builder.proxy(_proxy).get_updates_proxy(_proxy)
     app = _builder.build()
+    app.add_error_handler(on_error)
     app.add_handler(CommandHandler("start", on_start))
     app.add_handler(CommandHandler("botstats", on_botstats))
     app.add_handler(CommandHandler("help", on_help))
