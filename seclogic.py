@@ -86,6 +86,20 @@ def fingerprint(text, min_len=40):
     return hashlib.sha256(norm.encode("utf-8")).hexdigest()
 
 
+def has_link(text):
+    """True when the text carries any link host (incl. t.me)."""
+    return len(extract_hosts(text)) > 0
+
+
+def edit_adds_link(old_text, new_text):
+    """True when an edit introduces a link that wasn't there before.
+    old_text=None (original never logged) returns False — the caller
+    decides how to treat unknown originals; we don't punish a guess."""
+    if old_text is None:
+        return False
+    return has_link(new_text) and not has_link(old_text)
+
+
 def fresh_looking(has_username, photo_count):
     """Brand-new-looking account: no username and zero profile photos.
     photo_count=None means 'couldn't check' — never hold on a guess."""

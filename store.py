@@ -281,6 +281,9 @@ def _ensure_mod_tables(c):
         PRIMARY KEY(chat_id, user_id))""")
     c.execute("""CREATE TABLE IF NOT EXISTS appeals(
         user_id INTEGER PRIMARY KEY, kind TEXT, ts INTEGER)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS captcha_strikes(
+        chat_id INTEGER, user_id INTEGER, strikes INTEGER DEFAULT 0,
+        PRIMARY KEY(chat_id, user_id))""")
     c.execute("""CREATE TABLE IF NOT EXISTS faq(
         chat_id INTEGER, question TEXT, answer TEXT, added_by INTEGER, ts INTEGER,
         PRIMARY KEY(chat_id, question))""")
@@ -500,6 +503,32 @@ def appeal_record(user_id, kind):
                  ON CONFLICT(user_id) DO UPDATE SET kind=excluded.kind, ts=excluded.ts""",
               (user_id, kind, int(_time.time())))
     c.commit(); c.close()
+
+# --- Captcha strikes + message lookup (2026-10-25 final fixes round) ---
+
+def captcha_strike_add(chat_id, user_id):
+    """Record one failed captcha attempt; returns the new strike count."""
+    c = _conn()
+    c.execute("""INSERT INTO captcha_strikes(chat_id, user_id, strikes) VALUES(?, ?, 1)
+                 ON CONFLICT(chat_id, user_id) DO UPDATE SET strikes=strikes+1""",
+              (chat_id, user_id))
+    row = c.execute("SELECT strikes FROM captcha_strikes WHERE chat_id=? AND user_id=?",
+                    (chat_id, user_id)).fetchone()
+    c.commit(); c.close()
+    return row[0] if row else 1
+
+def captcha_strikes_clear(chat_id, user_id):
+    c = _conn()
+    c.execute("DELETE FROM captcha_strikes WHERE chat_id=? AND user_id=?", (chat_id, user_id))
+    c.commit(); c.close()
+
+def message_text(chat_id, message_id):
+    """The originally logged text of a message (for edit comparison)."""
+    c = _conn()
+    r = c.execute("""SELECT text FROM messages WHERE chat_id=? AND message_id=?
+                     ORDER BY id DESC LIMIT 1""", (chat_id, message_id)).fetchone()
+    c.close()
+    return r[0] if r else None
 
 # --- Phase 2 moderation (2026-10-25): blacklist, scam alerts, stats ---
 

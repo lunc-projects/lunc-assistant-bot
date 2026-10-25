@@ -78,6 +78,7 @@ Protection means: new joiners pass a short safety check in my DM before they can
 Safety rails on bans: every global ban is written to a permanent log, the owner is alerted instantly with a one-tap undo button, non-owner moderators can global-ban at most 5 people a day, and nobody but the owner can global-ban the owner, an elevated user, or an admin of a protected group. /modlog (owner only) shows the record.
 /appeal — in my DM: if you're on the global ban or AI ban list, ask the owner to review it (once a day)
 Automatic in protected groups: message flooding = delete + timed mute · the same long message posted across protected groups = deleted + muted + flagged to the owner · brand-new-looking accounts (no username, no profile photo) pass the safety check but start text-only for 24 hours · first-message links to official sites (Finder, LuncScan, Station, Keplr, Ledger) are allowed
+Edits and photo/video captions are checked the same way — post clean and swap in a scam link afterwards, and it's treated like posting it. The safety check allows 3 wrong answers before it removes you (you can rejoin and try again)
 /mute [minutes] — reply to a member to silence them (default 60 min) · /unmute
 /blacklist add <word> — in protected groups, a message containing it is deleted and the sender removed (owner + elevated users)
 /raid on/off — anti-raid lockdown for join surges (also triggers automatically)
@@ -592,6 +593,7 @@ async def on_aioff(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # no keys, and no fund-moving code anywhere in this bot.
 
 CAPTCHA_MINUTES = 10
+CAPTCHA_MAX_STRIKES = 3   # wrong safety-check answers before removal (rejoin + retry allowed)
 GBAN_DAILY_LIMIT_NONOWNER = 5  # global bans per UTC day for non-owner moderators (owner: no limit)
 
 # Security round 2 (2026-10-25): automatic anti-spam for protected
@@ -1063,6 +1065,7 @@ async def on_left_member(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     left = update.message.left_chat_member
     if left:
         store.captcha_clear(update.effective_chat.id, left.id)
+        store.captcha_strikes_clear(update.effective_chat.id, left.id)
         QUIZ.pop(left.id, None)
 
 async def _start_quiz(update, ctx, pend):
@@ -1097,9 +1100,21 @@ async def on_captcha_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     item = sess["items"][idx]
     if choice != item["answer"]:
         QUIZ.pop(uid, None)
+        strikes = store.captcha_strike_add(sess["chat_id"], uid)
+        if strikes >= CAPTCHA_MAX_STRIKES:
+            store.captcha_strikes_clear(sess["chat_id"], uid)
+            store.captcha_clear(sess["chat_id"], uid)
+            try:
+                await ctx.bot.ban_chat_member(sess["chat_id"], uid)
+                await ctx.bot.unban_chat_member(sess["chat_id"], uid, only_if_banned=True)
+            except Exception: pass
+            await q.answer("❌ Too many wrong answers.", show_alert=True)
+            try: await q.edit_message_text(f"❌ That's {CAPTCHA_MAX_STRIKES} wrong answers, so you've been removed from the group for now. You can rejoin and try the check again — read each question carefully; the safe answers are common sense.")
+            except Exception: pass
+            return
         await q.answer("❌ That's not the safe answer.", show_alert=True)
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("↻ Try the check again", url=f"https://t.me/{ctx.bot.username}?start=captcha")]])
-        try: await q.edit_message_text("❌ That answer isn't right, so this attempt ends here. Tap below and try again before your time in the group runs out.", reply_markup=kb)
+        try: await q.edit_message_text(f"❌ That answer isn't right, so this attempt ends here. Tap below and try again before your time in the group runs out.\n\n⚠️ Careful: {CAPTCHA_MAX_STRIKES - strikes} wrong answer(s) left — at {CAPTCHA_MAX_STRIKES} you're removed (you can rejoin and try again).", reply_markup=kb)
         except Exception: pass
         return
     sess["idx"] += 1
@@ -1112,6 +1127,7 @@ async def on_captcha_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = sess["chat_id"]
     QUIZ.pop(uid, None)
     store.captcha_clear(chat_id, uid)
+    store.captcha_strikes_clear(chat_id, uid)
     store.member_verify(chat_id, uid)
     # Fresh-account hold: no username AND no profile photo looks like a
     # throwaway account. They can chat right away, but text-only (no
@@ -1146,6 +1162,7 @@ async def job_captcha_sweep(ctx: ContextTypes.DEFAULT_TYPE):
             await ctx.bot.unban_chat_member(row["chat_id"], row["user_id"], only_if_banned=True)
         except Exception: pass
         store.captcha_clear(row["chat_id"], row["user_id"])
+        store.captcha_strikes_clear(row["chat_id"], row["user_id"])
         QUIZ.pop(row["user_id"], None)
 
 async def job_fresh_sweep(ctx: ContextTypes.DEFAULT_TYPE):
@@ -1793,6 +1810,66 @@ async def on_price(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception:
         await update.message.reply_text("Couldn't fetch price right now.")
 
+async def on_edited_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Protected groups: an edit gets the anti-scam checks too —
+    blacklisted words, and links swapped in after a clean first post
+    (compared against the originally logged text; for a member still
+    on a fresh-account hold, ANY link in an edit counts as a swap)."""
+    msg = update.edited_message
+    if not msg or not msg.text or not msg.from_user: return
+    chat, user, text = msg.chat, msg.from_user, msg.text
+    if chat.type not in ("group", "supergroup") or user.is_bot: return
+    if not store.mod_is_protected(chat.id): return
+    if _is_owner(user.id) or store.is_elevated(user.id): return
+    low = text.lower()
+    bad = next((w for w in store.blacklist_all() if w in low), None)
+    swap = False
+    if not bad:
+        old = store.message_text(chat.id, msg.message_id)
+        if old is not None:
+            swap = seclogic.edit_adds_link(old, text)
+        else:
+            fh = store.fresh_get(chat.id, user.id)
+            if fh and fh["until_ts"] > int(time.time()):
+                swap = seclogic.has_link(text)
+    if not bad and not swap: return
+    if await _is_group_admin(ctx, chat.id, user.id): return
+    try: await msg.delete()
+    except Exception: pass
+    try:
+        await ctx.bot.ban_chat_member(chat.id, user.id)
+        await ctx.bot.unban_chat_member(chat.id, user.id, only_if_banned=True)
+    except Exception: pass
+    why = f"edited a message to add a blacklisted word ('{bad}')" if bad else "edited a message to sneak in a link"
+    try: await ctx.bot.send_message(chat.id, f"🚫 A member was removed: they {why} (anti-scam protection). They may rejoin and try again.")
+    except Exception: pass
+
+async def on_media_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Protected groups: media captions get the text checks —
+    blacklisted words and the first-message link rule read captions,
+    so a scam link can't ride in under a photo."""
+    msg = update.message
+    if not msg or not msg.caption: return
+    chat, user, text = update.effective_chat, update.effective_user, msg.caption
+    if chat.type not in ("group", "supergroup") or user.is_bot: return
+    if not store.mod_is_protected(chat.id): return
+    first = store.first_msg_mark(chat.id, user.id)
+    if _is_owner(user.id) or store.is_elevated(user.id): return
+    low = text.lower()
+    bad = next((w for w in store.blacklist_all() if w in low), None)
+    has_link = any(e.type in ("url", "text_link") for e in (msg.caption_entities or [])) or bool(LINK_RE.search(text))
+    if not (bad or (first and has_link and not seclogic.all_links_allowlisted(text))): return
+    if await _is_group_admin(ctx, chat.id, user.id): return
+    try: await msg.delete()
+    except Exception: pass
+    try:
+        await ctx.bot.ban_chat_member(chat.id, user.id)
+        await ctx.bot.unban_chat_member(chat.id, user.id, only_if_banned=True)
+    except Exception: pass
+    why = f"a photo/video caption contained a blacklisted word ('{bad}')" if bad else "their first post here was a photo/video whose caption contained a link"
+    try: await ctx.bot.send_message(chat.id, f"🚫 A member was removed: {why} (anti-scam protection). They may rejoin and try again.")
+    except Exception: pass
+
 async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text: return
     chat, user, text = update.effective_chat, update.effective_user, update.message.text
@@ -2080,6 +2157,8 @@ def main():
     app.add_handler(CallbackQueryHandler(on_gov_callback, pattern=r"^gov:"))
     app.add_handler(CallbackQueryHandler(on_lang_callback, pattern=r"^lang:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
+    app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE & filters.TEXT & ~filters.COMMAND, on_edited_message))
+    app.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO | filters.ANIMATION | filters.Document.ALL | filters.AUDIO | filters.VOICE) & ~filters.COMMAND, on_media_message))
     if app.job_queue:
         app.job_queue.run_repeating(job_burn_check, interval=3600, first=120)
         app.job_queue.run_repeating(job_gov_check, interval=1800, first=180)
