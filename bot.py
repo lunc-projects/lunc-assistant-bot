@@ -570,10 +570,16 @@ GAMES_TEXT = (
     "🏎 *NEON RUSH* — neon highway racer. Dodge the traffic, chain near misses, and grab LUNC + USTC coins — they're your fuel, run dry and the run ends. Global leaderboard inside the game.\n\n"
     "🃏 *SOLITAIRE* — classic Klondike. Drag cards or tap to auto-move, double-tap sends a card home. Stars light up as you get cards home.\n\n"
     "🏀 *HOOPS* — flick Luna Classic tokens into the hoop. The little flame-haired guy does the shooting: drag back to aim, let go to throw. Baskets build a score multiplier; you've got 3 tokens and 3 minutes.\n\n"
+    "⚽ *PENALTY KICK* — ten kicks from the spot. Drag back and release to shoot, string goals together to raise the streak multiplier — and top corners count double.\n\n"
+    "🎯 *DARTS* — hold to aim the swaying crosshair, let go to throw. Rings pay up to 25 and the gold bull is 50.\n\n"
+    "🧩 *LUNA BLOCKS* — drag pieces onto the board, fill rows and columns to clear them. Clear 2+ lines in one move to unlock the golden Luna piece.\n\n"
     "Tap a game to play — it opens right here in Telegram.")
 NEON_RUSH_URL = "https://frg-fight-club.vercel.app/neon-rush/"
 SOLITAIRE_URL = "https://frg-fight-club.vercel.app/solitaire/"
 HOOPS_URL = "https://frg-fight-club.vercel.app/hoops/"
+PENALTY_URL = "https://frg-fight-club.vercel.app/penalty/"
+DARTS_URL = "https://frg-fight-club.vercel.app/darts/"
+BLOCKS_URL = "https://frg-fight-club.vercel.app/blocks/"
 
 # Native Telegram Games (registered in BotFather for this bot). The short
 # names are the identifiers Telegram sends back when a player taps Play.
@@ -581,19 +587,25 @@ TELEGRAM_GAMES = (
     ("neonrush", "🏎 Play NEON RUSH", NEON_RUSH_URL),
     ("solitaire", "🃏 Play SOLITAIRE", SOLITAIRE_URL),
     ("hoops", "🏀 Play HOOPS", HOOPS_URL),
+    ("penalty", "⚽ Play PENALTY KICK", PENALTY_URL),
+    ("darts", "🎯 Play DARTS", DARTS_URL),
+    ("blocks", "🧩 Play LUNA BLOCKS", BLOCKS_URL),
 )
 GAME_URL_BY_SHORT_NAME = {short: url for short, _, url in TELEGRAM_GAMES}
 # Telegram echoes the short name exactly as registered in BotFather, which
 # may differ in case from the lowercase names used to send the card.
 GAME_URL_BY_SHORT_NAME_CI = {short.lower(): url for short, url in GAME_URL_BY_SHORT_NAME.items()}
 
-# Public leaderboard APIs for the three games (same Vercel project as the
+# Public leaderboard APIs for the games (same Vercel project as the
 # game pages). The group /games post carries each game's Top 5 under the
 # cards; the full Top 20 board lives inside each game.
 GAME_BOARD_APIS = (
     ("neonrush", "🏎 *NEON RUSH*", "https://frg-fight-club.vercel.app/api/neon-rush-board"),
     ("solitaire", "🃏 *SOLITAIRE*", "https://frg-fight-club.vercel.app/api/solitaire-board"),
     ("hoops", "🏀 *HOOPS*", "https://frg-fight-club.vercel.app/api/hoops-board"),
+    ("penalty", "⚽ *PENALTY KICK*", "https://frg-fight-club.vercel.app/api/penalty-board"),
+    ("darts", "🎯 *DARTS*", "https://frg-fight-club.vercel.app/api/darts-board"),
+    ("blocks", "🧩 *LUNA BLOCKS*", "https://frg-fight-club.vercel.app/api/blocks-board"),
 )
 
 async def _fetch_board(url):
@@ -631,7 +643,10 @@ async def on_games(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if chat is not None and chat.type == "private":
         rows = [[InlineKeyboardButton("🏎 Play NEON RUSH", web_app=WebAppInfo(url=NEON_RUSH_URL))],
                 [InlineKeyboardButton("🃏 Play SOLITAIRE", web_app=WebAppInfo(url=SOLITAIRE_URL))],
-                [InlineKeyboardButton("🏀 Play HOOPS", web_app=WebAppInfo(url=HOOPS_URL))]]
+                [InlineKeyboardButton("🏀 Play HOOPS", web_app=WebAppInfo(url=HOOPS_URL))],
+                [InlineKeyboardButton("⚽ Play PENALTY KICK", web_app=WebAppInfo(url=PENALTY_URL))],
+                [InlineKeyboardButton("🎯 Play DARTS", web_app=WebAppInfo(url=DARTS_URL))],
+                [InlineKeyboardButton("🧩 Play LUNA BLOCKS", web_app=WebAppInfo(url=BLOCKS_URL))]]
         await update.message.reply_text(GAMES_TEXT, parse_mode=ParseMode.MARKDOWN,
             reply_markup=InlineKeyboardMarkup(rows))
         return

@@ -95,11 +95,14 @@ def check(name, cond):
         fails.append(name)
 
 
-check("three native games", [g[0] for g in bot.TELEGRAM_GAMES] == ["neonrush", "solitaire", "hoops"])
+check("six native games", [g[0] for g in bot.TELEGRAM_GAMES] == ["neonrush", "solitaire", "hoops", "penalty", "darts", "blocks"])
 check("short names map to the live pages",
       bot.GAME_URL_BY_SHORT_NAME["neonrush"].endswith("/neon-rush/")
       and bot.GAME_URL_BY_SHORT_NAME["solitaire"].endswith("/solitaire/")
-      and bot.GAME_URL_BY_SHORT_NAME["hoops"].endswith("/hoops/"))
+      and bot.GAME_URL_BY_SHORT_NAME["hoops"].endswith("/hoops/")
+      and bot.GAME_URL_BY_SHORT_NAME["penalty"].endswith("/penalty/")
+      and bot.GAME_URL_BY_SHORT_NAME["darts"].endswith("/darts/")
+      and bot.GAME_URL_BY_SHORT_NAME["blocks"].endswith("/blocks/"))
 
 
 class FakeBot:
@@ -131,6 +134,8 @@ async def fake_fetch_board(url):
         return {"all": [{"name": "Tom", "score": 1192}, {"name": "Ace", "score": 900}], "week": []}
     if "solitaire" in url:
         return {"all": [], "week": []}
+    if "penalty" in url:
+        return {"all": [{"name": "Zed", "score": 500}], "week": []}
     return None
 
 
@@ -152,10 +157,13 @@ async def group_case():
         rows = kwargs["reply_markup"].inline_keyboard
         flat = [b for row in rows for b in row]
         check("picker has one button per game",
-              [b.callback_data for b in flat] == ["pick:neonrush", "pick:solitaire", "pick:hoops"])
+              [b.callback_data for b in flat] == ["pick:neonrush", "pick:solitaire", "pick:hoops", "pick:penalty", "pick:darts", "pick:blocks"])
         check("picker text shows the Neon leader", "1. Tom — 1,192" in text)
         check("picker text marks the empty Solitaire board", text.count("No scores yet") == 1)
         check("picker text admits an unavailable board", "Leaderboard unavailable right now." in text)
+        check("picker text shows the Penalty leader", "1. Zed — 500" in text)
+        check("picker text titles all six boards",
+              all(t in text for t in ("*NEON RUSH*", "*SOLITAIRE*", "*HOOPS*", "*PENALTY KICK*", "*DARTS*", "*LUNA BLOCKS*")))
 
 
 class FakePick:
@@ -241,10 +249,16 @@ class FakeInlineQuery:
 async def inline_case():
     iq = FakeInlineQuery("")
     await bot.on_inline_query(types.SimpleNamespace(inline_query=iq), None)
-    check("empty inline query offers all three games", iq.answer_args[0] == ["neonrush", "solitaire", "hoops"])
+    check("empty inline query offers all six games", iq.answer_args[0] == ["neonrush", "solitaire", "hoops", "penalty", "darts", "blocks"])
     iq2 = FakeInlineQuery("hoop")
     await bot.on_inline_query(types.SimpleNamespace(inline_query=iq2), None)
     check("inline search filters by name", iq2.answer_args[0] == ["hoops"])
+    iq3 = FakeInlineQuery("blocks")
+    await bot.on_inline_query(types.SimpleNamespace(inline_query=iq3), None)
+    check("inline search finds Luna Blocks", iq3.answer_args[0] == ["blocks"])
+    iq4 = FakeInlineQuery("penalty")
+    await bot.on_inline_query(types.SimpleNamespace(inline_query=iq4), None)
+    check("inline search finds Penalty Kick", iq4.answer_args[0] == ["penalty"])
 
 
 asyncio.run(inline_case())
