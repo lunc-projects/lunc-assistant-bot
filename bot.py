@@ -583,6 +583,9 @@ TELEGRAM_GAMES = (
     ("hoops", "🏀 Play HOOPS", HOOPS_URL),
 )
 GAME_URL_BY_SHORT_NAME = {short: url for short, _, url in TELEGRAM_GAMES}
+# Telegram echoes the short name exactly as registered in BotFather, which
+# may differ in case from the lowercase names used to send the card.
+GAME_URL_BY_SHORT_NAME_CI = {short.lower(): url for short, url in GAME_URL_BY_SHORT_NAME.items()}
 
 # Public leaderboard APIs for the three games (same Vercel project as the
 # game pages). The group /games post carries each game's Top 5 under the
@@ -648,10 +651,12 @@ async def on_pick_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if q is None or not q.data:
         return
     short_name = q.data.split(":", 1)[1] if ":" in q.data else ""
-    entry = {s: (label, url) for s, label, url in TELEGRAM_GAMES}.get(short_name)
+    entry = {s.lower(): (label, url) for s, label, url in TELEGRAM_GAMES}.get(short_name.lower())
     if not entry:
+        print(f"pick callback with unknown game: data={q.data!r}")
         await q.answer(text="That game isn't available.", show_alert=True)
         return
+    short_name = short_name.lower()
     label, url = entry
     chat_id = q.message.chat.id if q.message is not None and q.message.chat is not None else None
     try:
@@ -669,7 +674,8 @@ async def on_game_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     if q is None or not q.game_short_name:
         return
-    url = GAME_URL_BY_SHORT_NAME.get(q.game_short_name)
+    url = GAME_URL_BY_SHORT_NAME_CI.get(q.game_short_name.lower())
+    print(f"game callback: short_name={q.game_short_name!r} -> {'ok' if url else 'UNMAPPED'}")
     if url:
         await q.answer(url=url)
     else:

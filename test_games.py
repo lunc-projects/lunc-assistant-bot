@@ -204,6 +204,9 @@ async def callback_case():
     q2 = FakeCallback("unknown")
     await bot.on_game_callback(types.SimpleNamespace(callback_query=q2), None)
     check("unknown game gets an alert", q2.answer_args.get("show_alert") is True)
+    q3 = FakeCallback("Hoops")
+    await bot.on_game_callback(types.SimpleNamespace(callback_query=q3), None)
+    check("BotFather case difference still resolves", q3.answer_args == {"url": bot.HOOPS_URL})
 
 
 asyncio.run(callback_case())
