@@ -72,13 +72,21 @@ for it in items:
     if not (0 <= it["answer"] < len(it["options"])): ok = False
     if len(it["options"]) < 3: ok = False
 check("every item has a valid answer index and 3+ options", ok)
+bank_correct = {q["options"][q["correct"]] for q in modquiz.QUESTIONS}
 facts = [it["options"][it["answer"]] for it in items[:3]]
-check("question answers are the safety facts",
-      any("Never share it" in f for f in facts) and
-      any("always fake" in f for f in facts) and
-      any("Close it" in f for f in facts))
+check("every drawn answer is a bank safety fact", all(f in bank_correct for f in facts))
+check("no duplicate questions in one quiz", len({it["prompt"] for it in items[:3]}) == 3)
 emoji_item = items[3]
-check("emoji item answer is the apple", emoji_item["options"][emoji_item["answer"]] == "🍎")
+target = emoji_item["options"][emoji_item["answer"]]
+check("emoji answer matches the prompt target",
+      target in modquiz.EMOJI_TARGETS and target in emoji_item["prompt"])
+seen = set()
+for s in range(200):
+    for it in modquiz.build_quiz(random.Random(1000 + s))[:3]:
+        seen.add(it["prompt"])
+check("draws rotate through the whole bank", seen == {q["q"] for q in modquiz.QUESTIONS})
+sets = {tuple(sorted(it["prompt"] for it in modquiz.build_quiz(random.Random(2000 + s))[:3])) for s in range(40)}
+check("different attempts get different question sets", len(sets) > 10)
 check("emoji item has 4 options", len(emoji_item["options"]) == 4)
 shuffled = modquiz.build_quiz(random.Random(99))
 check("rebuild reshuffles (very likely different order somewhere)",
