@@ -568,17 +568,21 @@ async def on_dex(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 GAMES_TEXT = (
     "🎮 *Luna Classic games*\n\n"
     "🏎 *NEON RUSH* — neon highway racer. Dodge the traffic, chain near misses, and grab LUNC + USTC coins — they're your fuel, run dry and the run ends. Global leaderboard inside the game.\n\n"
-    "Tap Play — in a DM the button opens the game right here in Telegram and your name goes on the board automatically; in a group it opens the game page.")
+    "🃏 *SOLITAIRE* — classic Klondike. Drag cards or tap to auto-move, double-tap sends a card home. Stars light up as you get cards home.\n\n"
+    "Tap a game to play — in a DM the button opens the game right here in Telegram; in a group it opens the game page.")
 NEON_RUSH_URL = "https://frg-fight-club.vercel.app/neon-rush/"
+SOLITAIRE_URL = "https://frg-fight-club.vercel.app/solitaire/"
 
 async def on_games(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat is not None and chat.type == "private":
-        btn = InlineKeyboardButton("🏎 Play NEON RUSH", web_app=WebAppInfo(url=NEON_RUSH_URL))
+        rows = [[InlineKeyboardButton("🏎 Play NEON RUSH", web_app=WebAppInfo(url=NEON_RUSH_URL))],
+                [InlineKeyboardButton("🃏 Play SOLITAIRE", web_app=WebAppInfo(url=SOLITAIRE_URL))]]
     else:
-        btn = InlineKeyboardButton("🏎 Play NEON RUSH", url=NEON_RUSH_URL)
+        rows = [[InlineKeyboardButton("🏎 Play NEON RUSH", url=NEON_RUSH_URL)],
+                [InlineKeyboardButton("🃏 Play SOLITAIRE", url=SOLITAIRE_URL)]]
     await update.message.reply_text(GAMES_TEXT, parse_mode=ParseMode.MARKDOWN,
-        reply_markup=InlineKeyboardMarkup([[btn]]))
+        reply_markup=InlineKeyboardMarkup(rows))
 
 async def on_safety(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(SAFETY_TEXT, parse_mode=ParseMode.MARKDOWN)
