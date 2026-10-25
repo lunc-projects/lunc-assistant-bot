@@ -1052,8 +1052,15 @@ async def on_new_members(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             store.member_verify(chat.id, m.id); continue
         try:
             await ctx.bot.restrict_chat_member(chat.id, m.id, permissions=NO_PERMS)
-        except Exception:
-            continue  # without restrict rights the gate can't hold them; the admin was warned at /protect time
+        except Exception as e:
+            # NEVER fail silently: a gate that can't hold a joiner is a
+            # live security hole. Warn the group (an admin must grant
+            # the 'Ban users' permission) and alert the owner through
+            # the throttled issue-alert channel.
+            try: await ctx.bot.send_message(chat.id, "⚠️ I couldn't hold a new member for the safety check — I need the 'Ban users' admin permission in this group. Until an admin grants it, new joiners here are NOT being checked.")
+            except Exception: pass
+            await _alert_owner(ctx.bot, f"safety gate in chat {chat.id}", e)
+            continue
         store.captcha_start(chat.id, m.id, int(time.time()) + CAPTCHA_MINUTES * 60)
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Start the safety check", url=f"https://t.me/{ctx.bot.username}?start=captcha")]])
         w = store.get_setting(chat.id, "welcome_text")
