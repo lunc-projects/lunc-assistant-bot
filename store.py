@@ -268,6 +268,8 @@ def _ensure_mod_tables(c):
     c.execute("""CREATE TABLE IF NOT EXISTS first_msg_seen(
         chat_id INTEGER, user_id INTEGER,
         PRIMARY KEY(chat_id, user_id))""")
+    c.execute("""CREATE TABLE IF NOT EXISTS blacklist(
+        word TEXT PRIMARY KEY, added_by INTEGER, ts INTEGER)""")
 
 import time as _time
 
@@ -399,3 +401,51 @@ def first_msg_mark(chat_id, user_id):
     cur = c.execute("INSERT OR IGNORE INTO first_msg_seen(chat_id, user_id) VALUES(?, ?)",
                     (chat_id, user_id))
     c.commit(); n = cur.rowcount; c.close(); return n > 0
+
+# --- Phase 2 moderation (2026-10-25): blacklist, scam alerts, stats ---
+
+def blacklist_add(word, added_by):
+    c = _conn()
+    c.execute("""INSERT INTO blacklist(word, added_by, ts) VALUES(?, ?, ?)
+                 ON CONFLICT(word) DO NOTHING""",
+              (word, added_by, int(_time.time())))
+    c.commit(); c.close()
+
+def blacklist_remove(word):
+    c = _conn()
+    cur = c.execute("DELETE FROM blacklist WHERE word=?", (word,))
+    c.commit(); n = cur.rowcount; c.close(); return n
+
+def blacklist_all():
+    c = _conn()
+    rows = c.execute("SELECT word FROM blacklist ORDER BY word").fetchall()
+    c.close(); return [r["word"] for r in rows]
+
+def scam_alerts_enabled(chat_id):
+    return get_setting(chat_id, "scam_alerts", "off") == "on"
+
+def set_scam_alerts(chat_id, on):
+    set_setting(chat_id, "scam_alerts", "on" if on else "off")
+
+def scam_last(chat_id):
+    try:
+        return int(get_setting(chat_id, "scam_last", "0") or 0)
+    except ValueError:
+        return 0
+
+def set_scam_last(chat_id, ts):
+    set_setting(chat_id, "scam_last", str(int(ts)))
+
+def mod_stats():
+    c = _conn()
+    def n(sql):
+        return c.execute(sql).fetchone()[0]
+    stats = {
+        "groups_protected": n("SELECT COUNT(*) FROM mod_groups WHERE approved=1"),
+        "groups_pending": n("SELECT COUNT(*) FROM mod_groups WHERE approved=0"),
+        "gbans": n("SELECT COUNT(*) FROM gbans"),
+        "elevated": n("SELECT COUNT(*) FROM elevated_users"),
+        "verified": n("SELECT COUNT(*) FROM members_verified"),
+        "pending": n("SELECT COUNT(*) FROM captcha_pending"),
+    }
+    c.close(); return stats

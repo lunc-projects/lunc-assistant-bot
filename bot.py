@@ -74,6 +74,11 @@ Group admins can turn AI off or on for this group only: /aioff, /aion. Default i
 Protection means: new joiners pass a short safety check in my DM before they can post · accounts on the network's global scam-ban list are removed on sight · a member whose first message contains a link is removed
 /gban — reply to a scammer's message (or /gban <user id>): ban them from every protected group
 /gunban <user id> — lift a global ban · /gbans — see the ban list
+/mute [minutes] — reply to a member to silence them (default 60 min) · /unmute
+/blacklist add <word> — in protected groups, a message containing it is deleted and the sender removed (owner + elevated users)
+/raid on/off — anti-raid lockdown for join surges (also triggers automatically)
+/scamalerts on/off — this protected group gets a safety reminder every ~6 hours (group admins)
+/banstats — the protection numbers
 (Protection controls: protected-group admins, owner-appointed elevated users, and the owner.)
 
 *Notifications (your choice, on/off)*
@@ -533,7 +538,7 @@ PRIVACY_TEXT = (
     "• *What the AI sees:* only when someone uses an AI feature (/ask, /summary, mentions, DM summaries). Then the AI service (Groq) receives the message text and usernames needed for that one answer. Simple commands (/price, /validators, …) send nothing anywhere.\n\n"
     "• *Your group's controls:* group admins run this group — including AI on/off (/aioff, /aion), alert settings, and notification choices. Usage stats are owner-only.\n\n"
     "• *The limits:* ranks, daily AI caps, and a hard daily token budget (200,000/day) mean the AI quota can't be drained by spam — the worst case is AI pausing until midnight UTC.\n\n"
-    "• *Group protection (opt-in):* in groups whose admins registered with /protect and the owner approved, new joiners pass a short safety check before they can post, accounts on the network's global scam-ban list are removed on sight, and a member whose first message contains a link is removed. Protected-group admins, owner-appointed elevated users, and the owner control the ban list.\n\n"
+    "• *Group protection (opt-in):* in groups whose admins registered with /protect and the owner approved, new joiners pass a short safety check before they can post, accounts on the network's global scam-ban list are removed on sight, and a member whose first message contains a link is removed. Moderators can also mute members, keep a word blacklist, trigger anti-raid lockdowns during join surges, and switch on timed safety reminders. Protected-group admins, owner-appointed elevated users, and the owner control the ban list.\n\n"
     "• *Don't take our word for it:* the bot's code is public — read exactly what it does: github.com/lunc-projects/lunc-assistant-bot")
 
 async def on_privacy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -574,6 +579,19 @@ FULL_PERMS = ChatPermissions(
 NO_PERMS = ChatPermissions()
 QUIZ = {}  # user_id -> {"chat_id", "items", "idx"}; in-memory only — the pending row + deadline persist in the store
 LINK_RE = re.compile(r"(https?://|www\.|t\.me/)", re.I)
+
+# Phase 2 (2026-10-25): anti-raid + timed anti-scam alerts.
+RAID_WINDOW = 60        # seconds
+RAID_COUNT = 10         # joins inside the window that trigger a lockdown
+RAID_MINUTES = 10       # lockdown length
+JOIN_TIMES = {}         # chat_id -> [join timestamps] (in-memory; raids are real-time events)
+RAID_UNTIL = {}         # chat_id -> lockdown end ts (in-memory)
+SCAM_ALERT_EVERY_HOURS = 6
+SCAM_ALERTS = [
+    "⚠️ Safety reminder: no admin will EVER DM you first or ask for your seed phrase. Anyone who does is a scammer — block and report them.",
+    "⚠️ Safety reminder: there are no LUNC-doubling giveaways. If you have to send crypto first to 'unlock' a prize, it's a scam — every time.",
+    "⚠️ Safety reminder: only trust links posted in this chat by its admins. Fake airdrop and 'verify your wallet' sites are built to drain wallets.",
+]
 
 def _is_owner(user_id):
     return OWNER_ID is not None and user_id == OWNER_ID
@@ -766,11 +784,29 @@ async def on_elevated(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def on_new_members(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat.type not in ("group", "supergroup") or not store.mod_is_protected(chat.id): return
+    # Anti-raid: a surge of joins inside a short window locks the group
+    # down for a while — during lockdown every new joiner is removed.
+    now = int(time.time())
+    times = [t for t in JOIN_TIMES.get(chat.id, []) if now - t < RAID_WINDOW]
+    times += [now] * len(update.message.new_chat_members)
+    JOIN_TIMES[chat.id] = times
+    raid = RAID_UNTIL.get(chat.id, 0) > now
+    if not raid and len(times) >= RAID_COUNT:
+        raid = True
+        RAID_UNTIL[chat.id] = now + RAID_MINUTES * 60
+        try: await ctx.bot.send_message(chat.id, f"🚨 Anti-raid: a surge of new joins was detected, so lockdown is ON for {RAID_MINUTES} minutes — new joiners are removed on sight. An admin can lift it early with /raid off.")
+        except Exception: pass
     for m in update.message.new_chat_members:
         if m.is_bot: continue
         if _is_owner(m.id): continue
         if store.gban_get(m.id):
             try: await ctx.bot.ban_chat_member(chat.id, m.id)
+            except Exception: pass
+            continue
+        if raid:
+            try:
+                await ctx.bot.ban_chat_member(chat.id, m.id)
+                await ctx.bot.unban_chat_member(chat.id, m.id, only_if_banned=True)
             except Exception: pass
             continue
         if store.member_is_verified(chat.id, m.id): continue
@@ -854,6 +890,124 @@ async def job_captcha_sweep(ctx: ContextTypes.DEFAULT_TYPE):
         except Exception: pass
         store.captcha_clear(row["chat_id"], row["user_id"])
         QUIZ.pop(row["user_id"], None)
+
+# --- Phase 2 moderation: mute, blacklist, anti-raid, alerts, stats ---
+
+async def on_mute(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if chat.type not in ("group", "supergroup"):
+        await update.message.reply_text("Use /mute in a group."); return
+    if not await _can_moderate(update, ctx):
+        await update.message.reply_text("Only the owner, elevated users, or admins of a protected group can do this."); return
+    target, rest = _mod_target(update, ctx)
+    if not target:
+        await update.message.reply_text("Usage: reply to their message with /mute [minutes], or /mute <user_id> [minutes]. Default is 60 minutes."); return
+    if _is_owner(target):
+        await update.message.reply_text("That user can't be muted."); return
+    minutes = 60
+    for tok in rest.split():
+        try: minutes = int(tok); break
+        except ValueError: continue
+    minutes = max(1, min(minutes, 43200))
+    until = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=minutes)
+    try:
+        await ctx.bot.restrict_chat_member(chat.id, target, permissions=NO_PERMS, until_date=until)
+        await update.message.reply_text(f"🔇 User {target} is muted for {minutes} minute(s).")
+    except Exception:
+        await update.message.reply_text("Couldn't mute them — the bot may lack admin rights here, or they're an admin.")
+
+async def on_unmute(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if chat.type not in ("group", "supergroup"):
+        await update.message.reply_text("Use /unmute in a group."); return
+    if not await _can_moderate(update, ctx):
+        await update.message.reply_text("Only the owner, elevated users, or admins of a protected group can do this."); return
+    target, _ = _mod_target(update, ctx)
+    if not target:
+        await update.message.reply_text("Usage: reply to their message with /unmute, or /unmute <user_id>."); return
+    try:
+        await ctx.bot.restrict_chat_member(chat.id, target, permissions=FULL_PERMS)
+        await update.message.reply_text(f"🔊 User {target} can chat again.")
+    except Exception:
+        await update.message.reply_text("Couldn't unmute them — the bot may lack admin rights here.")
+
+async def on_blacklist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not (_is_owner(uid) or store.is_elevated(uid)):
+        await update.message.reply_text("Only the owner and elevated users manage the word blacklist."); return
+    args = ctx.args or []
+    if len(args) >= 2 and args[0].lower() == "add":
+        word = args[1].lower().strip()
+        if len(word) < 3:
+            await update.message.reply_text("Blacklist words need at least 3 characters."); return
+        store.blacklist_add(word, uid)
+        await update.message.reply_text(f"✅ '{word}' is on the blacklist — in protected groups, a message containing it is deleted and the sender removed."); return
+    if len(args) >= 2 and args[0].lower() == "remove":
+        if store.blacklist_remove(args[1].lower()):
+            await update.message.reply_text("Removed from the blacklist.")
+        else:
+            await update.message.reply_text("That word wasn't on the blacklist.")
+        return
+    words = store.blacklist_all()
+    await update.message.reply_text("Word blacklist: " + (", ".join(words) if words else "(empty)") + "\nAdd: /blacklist add <word> · Remove: /blacklist remove <word>")
+
+async def on_raid(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if chat.type not in ("group", "supergroup"):
+        await update.message.reply_text("Use /raid in a group."); return
+    if not await _can_moderate(update, ctx):
+        await update.message.reply_text("Only the owner, elevated users, or admins of a protected group can do this."); return
+    arg = (ctx.args or [""])[0].lower()
+    if arg == "on":
+        RAID_UNTIL[chat.id] = int(time.time()) + RAID_MINUTES * 60
+        await update.message.reply_text(f"🚨 Anti-raid lockdown ON for {RAID_MINUTES} minutes — new joiners are removed on sight.")
+    elif arg == "off":
+        RAID_UNTIL.pop(chat.id, None)
+        await update.message.reply_text("Anti-raid lockdown lifted.")
+    else:
+        active = RAID_UNTIL.get(chat.id, 0) > int(time.time())
+        await update.message.reply_text(("🚨 Anti-raid lockdown is ON right now." if active else "Anti-raid lockdown is off (it turns on automatically during a join surge).") + " Usage: /raid on · /raid off")
+
+async def on_scamalerts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if chat.type not in ("group", "supergroup"):
+        await update.message.reply_text("Use /scamalerts in a group."); return
+    if not store.mod_is_protected(chat.id):
+        await update.message.reply_text("This group isn't protected yet — an admin can request it with /protect."); return
+    if not await _can_change(update, ctx):
+        await update.message.reply_text("Only group admins can change this."); return
+    arg = (ctx.args or [""])[0].lower()
+    if arg in ("on", "off"):
+        store.set_scam_alerts(chat.id, arg == "on")
+        await update.message.reply_text(f"⚠️ Timed anti-scam reminders are {arg.upper()} for this group" + (f" (one every ~{SCAM_ALERT_EVERY_HOURS} hours)." if arg == "on" else "."))
+    else:
+        await update.message.reply_text(f"Timed anti-scam reminders are {'ON' if store.scam_alerts_enabled(chat.id) else 'OFF'} for this group. Usage: /scamalerts on · /scamalerts off")
+
+async def job_scam_alerts(ctx: ContextTypes.DEFAULT_TYPE):
+    now = int(time.time())
+    for g in store.mod_groups():
+        cid = g["chat_id"]
+        if not store.scam_alerts_enabled(cid): continue
+        if now - store.scam_last(cid) < SCAM_ALERT_EVERY_HOURS * 3600: continue
+        text = SCAM_ALERTS[(now // (SCAM_ALERT_EVERY_HOURS * 3600)) % len(SCAM_ALERTS)]
+        try:
+            await ctx.bot.send_message(cid, text)
+            store.set_scam_last(cid, now)
+        except Exception:
+            pass
+
+async def on_banstats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await _can_moderate(update, ctx):
+        await update.message.reply_text("Only the owner, elevated users, or admins of a protected group can see this."); return
+    s = store.mod_stats()
+    await update.message.reply_text(
+        f"🛡 *Protection stats*\n"
+        f"Protected groups: {s['groups_protected']} (+{s['groups_pending']} pending approval)\n"
+        f"Global bans: {s['gbans']}\n"
+        f"Elevated users: {s['elevated']}\n"
+        f"Verified members (all groups): {s['verified']}\n"
+        f"Waiting on the safety check right now: {s['pending']}",
+        parse_mode=ParseMode.MARKDOWN)
 
 async def on_learn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
@@ -1056,22 +1210,29 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text: return
     chat, user, text = update.effective_chat, update.effective_user, update.message.text
     name = user.full_name + (f" (@{user.username})" if user.username else "")
-    # Group protection: in a protected group, a member whose FIRST tracked
-    # message contains a link is removed (Cosmobot's anti-scam rule).
-    # Runs before logging, so a deleted scam message never reaches summaries.
+    # Group protection (protected groups only): a blacklisted word in any
+    # message, or a link in a member's FIRST tracked message, removes the
+    # sender (Cosmobot's anti-scam rules). Owner, elevated users, and the
+    # group's own admins are exempt. Runs before logging, so a deleted
+    # scam message never reaches summaries.
     if chat.type in ("group", "supergroup") and not user.is_bot and store.mod_is_protected(chat.id):
-        if store.first_msg_mark(chat.id, user.id):
+        first = store.first_msg_mark(chat.id, user.id)
+        if not _is_owner(user.id) and not store.is_elevated(user.id):
+            low = text.lower()
+            bad = next((w for w in store.blacklist_all() if w in low), None)
             has_link = any(e.type in ("url", "text_link") for e in (update.message.entities or [])) or bool(LINK_RE.search(text))
-            if has_link and not _is_owner(user.id) and not store.is_elevated(user.id) and not await _is_group_admin(ctx, chat.id, user.id):
-                try: await update.message.delete()
-                except Exception: pass
-                try:
-                    await ctx.bot.ban_chat_member(chat.id, user.id)
-                    await ctx.bot.unban_chat_member(chat.id, user.id, only_if_banned=True)
-                except Exception: pass
-                try: await ctx.bot.send_message(chat.id, "🚫 A member was removed: their first message here contained a link (anti-scam protection). They may rejoin and try again.")
-                except Exception: pass
-                return
+            if bad or (first and has_link):
+                if not await _is_group_admin(ctx, chat.id, user.id):
+                    try: await update.message.delete()
+                    except Exception: pass
+                    try:
+                        await ctx.bot.ban_chat_member(chat.id, user.id)
+                        await ctx.bot.unban_chat_member(chat.id, user.id, only_if_banned=True)
+                    except Exception: pass
+                    why = f"contained a blacklisted word ('{bad}')" if bad else "their first message here contained a link"
+                    try: await ctx.bot.send_message(chat.id, f"🚫 A member was removed: their message {why} (anti-scam protection). They may rejoin and try again.")
+                    except Exception: pass
+                    return
     # Log group messages for summaries
     if chat.type in ("group", "supergroup"):
         store.log_message(chat.id, user.id, name, text, update.message.message_id)
@@ -1174,6 +1335,12 @@ def main():
     app.add_handler(CommandHandler("elevate", on_elevate))
     app.add_handler(CommandHandler("unelevate", on_unelevate))
     app.add_handler(CommandHandler("elevated", on_elevated))
+    app.add_handler(CommandHandler("mute", on_mute))
+    app.add_handler(CommandHandler("unmute", on_unmute))
+    app.add_handler(CommandHandler("blacklist", on_blacklist))
+    app.add_handler(CommandHandler("raid", on_raid))
+    app.add_handler(CommandHandler("scamalerts", on_scamalerts))
+    app.add_handler(CommandHandler("banstats", on_banstats))
     app.add_handler(CallbackQueryHandler(on_captcha_callback, pattern=r"^cap:"))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_new_members))
     app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_left_member))
@@ -1186,6 +1353,7 @@ def main():
         app.job_queue.run_repeating(job_gov_check, interval=1800, first=180)
         app.job_queue.run_repeating(job_validator_check, interval=3600, first=240)
         app.job_queue.run_repeating(job_captcha_sweep, interval=60, first=30)
+        app.job_queue.run_repeating(job_scam_alerts, interval=1800, first=300)
         import datetime as _dt
         app.job_queue.run_daily(job_burn_daily, time=_dt.time(hour=1, minute=0))  # ~9pm ET (UTC-4), shifts 1h in winter
     print("LUNC Assistant Bot polling…")
