@@ -6,7 +6,7 @@ Run: TELEGRAM_BOT_TOKEN=... AI_API_KEY=... python bot.py
 """
 import os, re, time, json, datetime, pathlib
 import httpx
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions, WebAppInfo
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 import store, ai_client, burn as burn_mod, chain, lang as lang_mod, ratelimit, budget, modquiz, topics, seclogic, alerts as alerts_mod
@@ -55,6 +55,7 @@ Or just @mention me in the group, or DM me
 *Info*
 /links — official links only
 /dex — DEXes on Luna Classic
+/games — play Luna Classic games
 /safety — scam / seed phrase safety rules
 /privacy — what this bot logs, what the AI sees, what it can never do
 /learn <word> — plain-English glossary (e.g. /learn quorum)
@@ -563,6 +564,21 @@ async def on_links(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def on_dex(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(DEX_TEXT, parse_mode=ParseMode.MARKDOWN)
+
+GAMES_TEXT = (
+    "🎮 *Luna Classic games*\n\n"
+    "🏎 *NEON RUSH* — neon highway racer. Dodge the traffic, chain near misses, and grab LUNC + USTC coins — they're your fuel, run dry and the run ends. Global leaderboard inside the game.\n\n"
+    "Tap Play — in a DM the button opens the game right here in Telegram and your name goes on the board automatically; in a group it opens the game page.")
+NEON_RUSH_URL = "https://frg-fight-club.vercel.app/neon-rush/"
+
+async def on_games(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if chat is not None and chat.type == "private":
+        btn = InlineKeyboardButton("🏎 Play NEON RUSH", web_app=WebAppInfo(url=NEON_RUSH_URL))
+    else:
+        btn = InlineKeyboardButton("🏎 Play NEON RUSH", url=NEON_RUSH_URL)
+    await update.message.reply_text(GAMES_TEXT, parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup([[btn]]))
 
 async def on_safety(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(SAFETY_TEXT, parse_mode=ParseMode.MARKDOWN)
@@ -2077,7 +2093,7 @@ async def post_init(app: Application):
         await app.bot.set_my_short_description("Summarizes hundreds of group messages into a quick summary + AI assistant.")
         await app.bot.set_my_commands([
             ("summary","Summarize group messages"),("catchup","What you missed"),("tldr","Shrink a message (reply to it)"),
-            ("ask","Ask me anything"),("proposals","Proposals voting now"),("proposal","Proposal + tally"),("price","LUNC + USTC price"),("stats","Chain stats"),("burn","Live burn tax info"),("burnalerts","Burn notifications on/off"),("govalerts","Proposal alerts on/off"),("wallet","Public wallet lookup"),("token","CW20 token info"),("validators","Top validators"),("watchvalidator","Watch a validator"),("rank","Your rank in this chat"),("language","Choose your language"),("privacy","Privacy & security info"),("dex","DEXes on Luna Classic"),("protect","Request scam protection (group admins)"),("aiban","AI-ban a user (moderators)"),("appeal","Appeal a ban (in DM)"),("rules","This group's rules"),("menu","Buttons menu — no typing"),("panel","Admin panel (group admins)"),("help","All commands")])
+            ("ask","Ask me anything"),("proposals","Proposals voting now"),("proposal","Proposal + tally"),("price","LUNC + USTC price"),("stats","Chain stats"),("burn","Live burn tax info"),("burnalerts","Burn notifications on/off"),("govalerts","Proposal alerts on/off"),("wallet","Public wallet lookup"),("token","CW20 token info"),("validators","Top validators"),("watchvalidator","Watch a validator"),("rank","Your rank in this chat"),("language","Choose your language"),("privacy","Privacy & security info"),("dex","DEXes on Luna Classic"),("games","Play Luna Classic games"),("protect","Request scam protection (group admins)"),("aiban","AI-ban a user (moderators)"),("appeal","Appeal a ban (in DM)"),("rules","This group's rules"),("menu","Buttons menu — no typing"),("panel","Admin panel (group admins)"),("help","All commands")])
         # Profile photo (owner's logo) — re-applied on boot so redeploys never lose it
         try:
             from telegram import InputProfilePhotoStatic
@@ -2126,6 +2142,7 @@ def main():
     app.add_handler(CommandHandler("calc", on_calc))
     app.add_handler(CommandHandler("links", on_links))
     app.add_handler(CommandHandler("dex", on_dex))
+    app.add_handler(CommandHandler("games", on_games))
     app.add_handler(CommandHandler("safety", on_safety))
     app.add_handler(CommandHandler("learn", on_learn))
     app.add_handler(CommandHandler("govalerts", on_govalerts))
