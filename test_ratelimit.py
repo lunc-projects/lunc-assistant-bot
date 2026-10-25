@@ -60,10 +60,21 @@ def test_chat_cap():
 
 def test_rank_caps():
     fresh()
-    for _ in range(25):
+    for _ in range(6):
         assert ratelimit.allowed_for_rank(7, -300, OWNER, rank=2, now=DAY1) is True
     assert ratelimit.allowed_for_rank(7, -300, OWNER, rank=2, now=DAY1) is False
     assert ratelimit.allowed_for_rank(7, -300, OWNER, rank=2, now=DAY2) is True
+
+
+def test_rank_zero_and_one_caps():
+    fresh()
+    for _ in range(2):
+        assert ratelimit.allowed_for_rank(8, -400, OWNER, rank=0, now=DAY1) is True
+    assert ratelimit.allowed_for_rank(8, -400, OWNER, rank=0, now=DAY1) is False
+    fresh()
+    for _ in range(4):
+        assert ratelimit.allowed_for_rank(9, -500, OWNER, rank=1, now=DAY1) is True
+    assert ratelimit.allowed_for_rank(9, -500, OWNER, rank=1, now=DAY1) is False
 
 
 if __name__ == "__main__":

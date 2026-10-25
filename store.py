@@ -175,12 +175,13 @@ def usage_counts():
 # per calendar day max, however many messages). Raw message counts can be
 # farmed by spamming; distinct days cannot. Commands are never logged, so
 # querying can never earn rank.
-#   rank 0: fewer than RANK_DAYS_1 distinct days (includes never seen) — no AI queries
-#   rank 1: RANK_DAYS_1..RANK_DAYS_2-1 days — AI queries, standard hourly caps
-#   rank 2: RANK_DAYS_2+ days — AI queries, higher hourly caps
+#   rank 0: fewer than RANK_DAYS_1 distinct days (includes never seen) — 2 AI queries/day
+#   rank 1: RANK_DAYS_1..RANK_DAYS_2-1 days — 4 AI queries/day
+#   rank 2: RANK_DAYS_2+ days — 6 AI queries/day
+# (Daily caps live in ratelimit.py — owner decision 2026-10-25.)
 # A manual override (owner-set) always wins over the earned rank.
-# Caveat, same as the rest of this bot: the DB lives on ephemeral disk, so
-# a redeploy resets rank history; the owner can re-grant with /rankset.
+# The DB lives on a persistent volume (/data), so rank history survives
+# redeploys; the owner can still adjust anyone with /rankset.
 RANK_DAYS_1 = 3
 RANK_DAYS_2 = 30
 
@@ -270,6 +271,11 @@ def _ensure_mod_tables(c):
         PRIMARY KEY(chat_id, user_id))""")
     c.execute("""CREATE TABLE IF NOT EXISTS blacklist(
         word TEXT PRIMARY KEY, added_by INTEGER, ts INTEGER)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS ai_bans(
+        user_id INTEGER PRIMARY KEY, reason TEXT, banned_by INTEGER, ts INTEGER)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS mod_log(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, actor INTEGER, action TEXT,
+        target INTEGER, chat_id INTEGER, detail TEXT, ts INTEGER)""")
     c.execute("""CREATE TABLE IF NOT EXISTS faq(
         chat_id INTEGER, question TEXT, answer TEXT, added_by INTEGER, ts INTEGER,
         PRIMARY KEY(chat_id, question))""")
@@ -405,6 +411,54 @@ def first_msg_mark(chat_id, user_id):
                     (chat_id, user_id))
     c.commit(); n = cur.rowcount; c.close(); return n > 0
 
+# --- AI bans + moderation log (2026-10-25): an AI ban blocks ONLY the
+# AI features (the ai_guard checks it) — the user keeps every simple
+# command and can still chat. The mod log is the permanent record of
+# who did what; it is what makes moderator power auditable.
+
+def ai_ban_add(user_id, reason, banned_by):
+    c = _conn()
+    c.execute("""INSERT INTO ai_bans(user_id, reason, banned_by, ts) VALUES(?, ?, ?, ?)
+                 ON CONFLICT(user_id) DO UPDATE SET reason=excluded.reason,
+                 banned_by=excluded.banned_by, ts=excluded.ts""",
+              (user_id, reason or "", banned_by, int(_time.time())))
+    c.commit(); c.close()
+
+def ai_ban_remove(user_id):
+    c = _conn()
+    cur = c.execute("DELETE FROM ai_bans WHERE user_id=?", (user_id,))
+    c.commit(); n = cur.rowcount; c.close(); return n
+
+def ai_ban_get(user_id):
+    c = _conn()
+    r = c.execute("SELECT * FROM ai_bans WHERE user_id=?", (user_id,)).fetchone()
+    c.close(); return r
+
+def is_ai_banned(user_id):
+    return ai_ban_get(user_id) is not None
+
+def ai_ban_all():
+    c = _conn()
+    rows = c.execute("SELECT * FROM ai_bans ORDER BY ts DESC").fetchall()
+    c.close(); return rows
+
+def mod_log_add(actor, action, target, chat_id, detail):
+    c = _conn()
+    c.execute("INSERT INTO mod_log(actor, action, target, chat_id, detail, ts) VALUES(?, ?, ?, ?, ?, ?)",
+              (actor, action, target, chat_id, detail or "", int(_time.time())))
+    c.commit(); c.close()
+
+def mod_log_recent(limit=20):
+    c = _conn()
+    rows = c.execute("SELECT * FROM mod_log ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()
+    c.close(); return rows
+
+def mod_action_count(actor, action, since_ts):
+    c = _conn()
+    n = c.execute("SELECT COUNT(*) FROM mod_log WHERE actor=? AND action=? AND ts>=?",
+                  (actor, action, int(since_ts))).fetchone()[0]
+    c.close(); return n
+
 # --- Phase 2 moderation (2026-10-25): blacklist, scam alerts, stats ---
 
 def blacklist_add(word, added_by):
@@ -447,6 +501,7 @@ def mod_stats():
         "groups_protected": n("SELECT COUNT(*) FROM mod_groups WHERE approved=1"),
         "groups_pending": n("SELECT COUNT(*) FROM mod_groups WHERE approved=0"),
         "gbans": n("SELECT COUNT(*) FROM gbans"),
+        "ai_bans": n("SELECT COUNT(*) FROM ai_bans"),
         "elevated": n("SELECT COUNT(*) FROM elevated_users"),
         "verified": n("SELECT COUNT(*) FROM members_verified"),
         "pending": n("SELECT COUNT(*) FROM captcha_pending"),

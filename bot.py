@@ -60,7 +60,7 @@ Or just @mention me in the group, or DM me
 
 *Ranks (AI access)*
 /rank — your rank + what it unlocks
-Rank 0: new here, no AI queries yet · Rank 1: regular, 10 AI queries/day · Rank 2: trusted, 25 AI queries/day
+Rank 0: starting out, 2 AI queries/day · Rank 1: regular (3+ days), 4 AI queries/day · Rank 2: trusted (30+ days), 6 AI queries/day
 Rank is earned by chatting on distinct days (not message count). Owner: /rankset, /rankclear (in groups)
 
 *Daily AI pot*
@@ -74,6 +74,8 @@ Group admins can turn AI off or on for this group only: /aioff, /aion. Default i
 Protection means: new joiners pass a short safety check in my DM before they can post · accounts on the network's global scam-ban list are removed on sight · a member whose first message contains a link is removed
 /gban — reply to a scammer's message (or /gban <user id>): ban them from every protected group
 /gunban <user id> — lift a global ban · /gbans — see the ban list
+/aiban — reply to an abusive user (or /aiban <user id>): block ALL AI features for them — simple commands still work · /aiunban <user id> lifts it · /aibans lists them
+Safety rails on bans: every global ban is written to a permanent log, the owner is alerted instantly with a one-tap undo button, non-owner moderators can global-ban at most 5 people a day, and nobody but the owner can global-ban the owner, an elevated user, or an admin of a protected group. /modlog (owner only) shows the record.
 /mute [minutes] — reply to a member to silence them (default 60 min) · /unmute
 /blacklist add <word> — in protected groups, a message containing it is deleted and the sender removed (owner + elevated users)
 /raid on/off — anti-raid lockdown for join surges (also triggers automatically)
@@ -176,11 +178,11 @@ async def on_rank(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         rank, days, override = store.rank_info(chat.id, user.id)
         scope = "in this chat"
     if rank == 0:
-        unlocks = "AI queries are locked — chat in a group on a few different days to reach rank 1."
+        unlocks = "AI queries at the starter cap: 2 per day. Chat on 3 different days to reach rank 1 (4 per day)."
     elif rank == 1:
-        unlocks = "AI queries unlocked (standard daily cap: 10 per day)."
+        unlocks = "AI queries unlocked (daily cap: 4 per day). Chat on 30 different days to reach rank 2 (6 per day)."
     else:
-        unlocks = "AI queries unlocked (higher daily cap: 25 per day)."
+        unlocks = "AI queries unlocked (top daily cap: 6 per day)."
     extra = " (set by the owner)" if override is not None else ""
     await update.message.reply_text(
         f"🎖 Your rank {scope}: {rank}{extra}\n"
@@ -252,9 +254,10 @@ async def on_lang_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await q.edit_message_text(lang_mod.t("picked", code, name=lang_mod.LABELS[code]),
                               reply_markup=lang_mod.lang_keyboard())
 
-RANK0_NOTE = ("🔰 You're rank 0, so AI queries are locked for now. "
-              "Chat in a group on a few different days to reach rank 1 — "
-              "no AI call was spent on this message.")
+AI_BANNED_NOTE = (
+    "🚫 AI is off for your account — a moderator put an AI ban on it. "
+    "Simple commands still work: /price, /validators, /proposals, /links, /calc, /stake, /safety. "
+    "If you think this is a mistake, ask a group admin or the bot owner.")
 
 GROUP_AI_OFF_NOTE = (
     "🔒 AI is turned off in this group by its admins. Simple commands still work: "
@@ -262,8 +265,9 @@ GROUP_AI_OFF_NOTE = (
     "An admin can turn AI back on with /aion.")
 
 async def ai_guard(update):
-    """AI gate: kill switch, then the group's own AI switch, then rank,
-    then daily cap. False = message already sent."""
+    """AI gate: kill switch, then the group's own AI switch, then the
+    caller's AI ban, then the rank daily caps (2/4/6 by rank).
+    False = message already sent."""
     if not AI_ENABLED:
         await update.message.reply_text(
             "🤖 AI features are temporarily disabled while we review security. "
@@ -274,17 +278,17 @@ async def ai_guard(update):
         return False
     user_id = update.effective_user.id
     chat = update.effective_chat
+    if user_id != OWNER_ID and store.is_ai_banned(user_id):
+        await update.message.reply_text(AI_BANNED_NOTE)
+        return False
     if chat.type == "private":
         rank = store.rank_anywhere(user_id)
     else:
         rank = store.rank_for(chat.id, user_id)
-    if user_id != OWNER_ID and rank == 0:
-        await update.message.reply_text(RANK0_NOTE)
-        return False
     if ratelimit.allowed_for_rank(user_id, chat.id, OWNER_ID, rank=rank):
         return True
     await update.message.reply_text(
-        "⏳ You've hit your daily AI limit — it resets at midnight UTC. (This cap protects the bot's AI quota from spam.)")
+        "⏳ You've hit your daily AI limit — it resets at midnight UTC. (Ranks allow 2, 4, or 6 AI questions a day; this cap protects the bot's AI quota from spam.)")
     return False
 
 FALLBACK_NOTE = "📋 Basic summary (AI is off — no AI used):\n\n"
@@ -552,8 +556,8 @@ PRIVACY_TEXT = (
     "• *What it logs:* in groups, message text is kept for 7 days so /summary and /catchup can work, then deleted automatically. Your rank counts the days you chat — commands don't count.\n\n"
     "• *What the AI sees:* only when someone uses an AI feature (/ask, /summary, mentions, DM summaries). Then the AI service (Groq) receives the message text and usernames needed for that one answer. Simple commands (/price, /validators, …) send nothing anywhere.\n\n"
     "• *Your group's controls:* group admins run this group — including AI on/off (/aioff, /aion), alert settings, and notification choices. Usage stats are owner-only.\n\n"
-    "• *The limits:* ranks, daily AI caps, and a hard daily token budget (200,000/day) mean the AI quota can't be drained by spam — the worst case is AI pausing until midnight UTC.\n\n"
-    "• *Group protection (opt-in):* in groups whose admins registered with /protect and the owner approved, new joiners pass a short safety check before they can post, accounts on the network's global scam-ban list are removed on sight, and a member whose first message contains a link is removed. Moderators can also mute members, keep a word blacklist, trigger anti-raid lockdowns during join surges, and switch on timed safety reminders. Protected-group admins, owner-appointed elevated users, and the owner control the ban list.\n\n"
+    "• *The limits:* ranks allow 2 (starting), 4, or 6 AI questions a day depending on time in the community, moderators can AI-ban an abusive account from AI features only (simple commands keep working), and a hard daily token budget (200,000/day) means the AI quota can't be drained by spam — the worst case is AI pausing until midnight UTC.\n\n"
+    "• *Group protection (opt-in):* in groups whose admins registered with /protect and the owner approved, new joiners pass a short safety check before they can post, accounts on the network's global scam-ban list are removed on sight, and a member whose first message contains a link is removed. Moderators can also mute members, keep a word blacklist, trigger anti-raid lockdowns during join surges, and switch on timed safety reminders. Protected-group admins, owner-appointed elevated users, and the owner control the ban list — with rails on that power: every global ban is written to a permanent moderation log, the owner is alerted instantly with a one-tap undo, non-owner moderators are limited to 5 global bans a day, and only the owner can global-ban an elevated user or another protected group's admin.\n\n"
     "• *Don't take our word for it:* the bot's code is public — read exactly what it does: github.com/lunc-projects/lunc-assistant-bot")
 
 async def on_privacy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -586,6 +590,7 @@ async def on_aioff(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # no keys, and no fund-moving code anywhere in this bot.
 
 CAPTCHA_MINUTES = 10
+GBAN_DAILY_LIMIT_NONOWNER = 5  # global bans per UTC day for non-owner moderators (owner: no limit)
 FULL_PERMS = ChatPermissions(
     can_send_messages=True, can_send_audios=True, can_send_documents=True,
     can_send_photos=True, can_send_videos=True, can_send_video_notes=True,
@@ -740,30 +745,75 @@ def _mod_target(update, ctx):
         except ValueError: return None, ""
     return None, ""
 
+def _utc_day_start():
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return int(now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+
+async def _owner_mod_alert(ctx, text, undo_user_id=None):
+    """Instant owner DM for a moderator action, with a one-tap undo
+    button for global bans. The owner is the backstop on ban abuse."""
+    if not OWNER_ID:
+        return
+    kb = None
+    if undo_user_id:
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton(
+            "↩️ Undo this global ban", callback_data=f"modundo:{undo_user_id}")]])
+    try:
+        await ctx.bot.send_message(OWNER_ID, text, reply_markup=kb)
+    except Exception:
+        pass
+
 async def on_gban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _can_moderate(update, ctx):
         await update.message.reply_text("Only the owner, elevated users, or admins of a protected group can do this."); return
+    actor = update.effective_user.id
     target, reason = _mod_target(update, ctx)
     if not target:
         await update.message.reply_text("Usage: reply to the scammer's message with /gban [reason], or /gban <user_id> [reason]."); return
     if _is_owner(target):
         await update.message.reply_text("That user can't be banned."); return
-    store.gban_add(target, reason, update.effective_user.id)
+    if target == actor:
+        await update.message.reply_text("You can't ban yourself."); return
+    if not _is_owner(actor):
+        # Anti-abuse rails (2026-10-25): moderators can't ban up the
+        # chain, and nobody gets to mass-ban — the owner is alerted
+        # with an undo button for every one of these (below).
+        if store.is_elevated(target):
+            await update.message.reply_text("🚫 Only the owner can globally ban an elevated user."); return
+        for g in store.mod_groups():
+            if await _is_group_admin(ctx, g["chat_id"], target):
+                await update.message.reply_text("🚫 That user is an admin in a protected group — only the owner can globally ban them."); return
+        if store.mod_action_count(actor, "gban", _utc_day_start()) >= GBAN_DAILY_LIMIT_NONOWNER:
+            await update.message.reply_text(f"🚫 You've hit today's limit of {GBAN_DAILY_LIMIT_NONOWNER} global bans for non-owner moderators — it resets at midnight UTC. The owner has no limit."); return
+    store.gban_add(target, reason, actor)
+    store.mod_log_add(actor, "gban", target, update.effective_chat.id, reason)
     ok, fail = await _apply_gban(ctx, target, True)
     await update.message.reply_text(f"🚫 User {target} is now globally banned — removed from {ok} protected group(s)" + (f" ({fail} failed — the bot may lack admin rights there)" if fail else "") + ".")
+    if not _is_owner(actor):
+        await _owner_mod_alert(ctx,
+            f"🚫 Global ban by moderator {actor}\nUser: {target}\nReason: {reason or '(none given)'}\nFrom chat: {update.effective_chat.id}\nRemoved from {ok} group(s)" + (f" ({fail} failed)" if fail else "") + "\nWrong call? Undo it:",
+            undo_user_id=target)
 
 async def on_gunban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _can_moderate(update, ctx):
         await update.message.reply_text("Only the owner, elevated users, or admins of a protected group can do this."); return
+    actor = update.effective_user.id
     if not ctx.args:
         await update.message.reply_text("Usage: /gunban <user_id>"); return
     try: target = int(ctx.args[0])
     except ValueError:
         await update.message.reply_text("User id must be a number."); return
-    if not store.gban_remove(target):
+    row = store.gban_get(target)
+    if row is None:
         await update.message.reply_text("That user isn't on the global ban list."); return
+    if not _is_owner(actor) and row["banned_by"] == OWNER_ID:
+        await update.message.reply_text("🚫 Only the owner can lift a global ban the owner placed."); return
+    store.gban_remove(target)
+    store.mod_log_add(actor, "gunban", target, update.effective_chat.id, "")
     ok, fail = await _apply_gban(ctx, target, False)
     await update.message.reply_text(f"✅ User {target} removed from the global ban list and unbanned in {ok} group(s)" + (f" ({fail} failed)" if fail else "") + ".")
+    if not _is_owner(actor):
+        await _owner_mod_alert(ctx, f"✅ Global ban LIFTED by moderator {actor}\nUser: {target}\nUnbanned in {ok} group(s)" + (f" ({fail} failed)" if fail else "") + ".")
 
 async def on_gbans(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _can_moderate(update, ctx):
@@ -773,9 +823,87 @@ async def on_gbans(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("The global ban list is empty."); return
     lines = [f"*Global ban list ({len(rows)})*"]
     for r in rows[:30]:
-        lines.append(f"• {r['user_id']}" + (f" — {r['reason']}" if r["reason"] else ""))
+        lines.append(f"• {r['user_id']}" + (f" — {r['reason']}" if r["reason"] else "") + f" (by {r['banned_by']})")
     if len(rows) > 30: lines.append(f"…and {len(rows) - 30} more")
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+async def on_aiban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """AI ban: blocks ALL AI features for one user (every chat + DM).
+    They keep chatting and keep every simple command — only the token-
+    spending features stop. The light-touch answer to AI abuse."""
+    if not await _can_moderate(update, ctx):
+        await update.message.reply_text("Only the owner, elevated users, or admins of a protected group can do this."); return
+    actor = update.effective_user.id
+    target, reason = _mod_target(update, ctx)
+    if not target:
+        await update.message.reply_text("Usage: reply to their message with /aiban [reason], or /aiban <user_id> [reason]."); return
+    if _is_owner(target):
+        await update.message.reply_text("That user can't be AI-banned."); return
+    if target == actor:
+        await update.message.reply_text("You can't AI-ban yourself."); return
+    if not _is_owner(actor) and store.is_elevated(target):
+        await update.message.reply_text("🚫 Only the owner can AI-ban an elevated user."); return
+    store.ai_ban_add(target, reason, actor)
+    store.mod_log_add(actor, "aiban", target, update.effective_chat.id, reason)
+    await update.message.reply_text(f"🤖🚫 User {target} is AI-banned — no /ask, summaries, or AI answers for them anywhere. Simple commands still work. Lift it with /aiunban {target}.")
+    if not _is_owner(actor):
+        await _owner_mod_alert(ctx, f"🤖🚫 AI ban by moderator {actor}\nUser: {target}\nReason: {reason or '(none given)'}\nFrom chat: {update.effective_chat.id}\nLift it any time with /aiunban {target}.")
+
+async def on_aiunban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await _can_moderate(update, ctx):
+        await update.message.reply_text("Only the owner, elevated users, or admins of a protected group can do this."); return
+    actor = update.effective_user.id
+    if not ctx.args:
+        await update.message.reply_text("Usage: /aiunban <user_id>"); return
+    try: target = int(ctx.args[0])
+    except ValueError:
+        await update.message.reply_text("User id must be a number."); return
+    row = store.ai_ban_get(target)
+    if row is None:
+        await update.message.reply_text("That user isn't AI-banned."); return
+    if not _is_owner(actor) and row["banned_by"] == OWNER_ID:
+        await update.message.reply_text("🚫 Only the owner can lift an AI ban the owner placed."); return
+    store.ai_ban_remove(target)
+    store.mod_log_add(actor, "aiunban", target, update.effective_chat.id, "")
+    await update.message.reply_text(f"✅ AI ban lifted for user {target} — AI features work for them again (rank caps still apply).")
+
+async def on_aibans(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await _can_moderate(update, ctx):
+        await update.message.reply_text("Only the owner, elevated users, or admins of a protected group can see this."); return
+    rows = store.ai_ban_all()
+    if not rows:
+        await update.message.reply_text("No AI bans right now."); return
+    lines = [f"*AI ban list ({len(rows)})*"]
+    for r in rows[:30]:
+        lines.append(f"• {r['user_id']}" + (f" — {r['reason']}" if r["reason"] else "") + f" (by {r['banned_by']})")
+    if len(rows) > 30: lines.append(f"…and {len(rows) - 30} more")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+async def on_modlog(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await _owner_only(update): return
+    rows = store.mod_log_recent(15)
+    if not rows:
+        await update.message.reply_text("The moderation log is empty."); return
+    lines = ["*Moderation log — latest first*"]
+    for r in rows:
+        when = datetime.datetime.fromtimestamp(r["ts"], datetime.timezone.utc).strftime("%b %d %H:%M UTC")
+        lines.append(f"• {when} — {r['action']}: user {r['target']} by {r['actor']}" + (f" — {r['detail']}" if r["detail"] else ""))
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+async def on_modundo_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not _is_owner(q.from_user.id):
+        await q.answer("Owner only.", show_alert=True); return
+    try: target = int((q.data or "").split(":")[1])
+    except Exception:
+        await q.answer("Bad button."); return
+    if not store.gban_remove(target):
+        await q.answer("That ban is already gone.", show_alert=True); return
+    store.mod_log_add(q.from_user.id, "gunban", target, None, "owner undo button")
+    ok, fail = await _apply_gban(ctx, target, False)
+    await q.answer("Ban lifted ✅")
+    try: await q.edit_message_text((q.message.text or "") + f"\n\n↩️ Undone by you — user {target} unbanned in {ok} group(s)" + (f" ({fail} failed)" if fail else "") + ".")
+    except Exception: pass
 
 async def on_elevate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _owner_only(update): return
@@ -789,6 +917,7 @@ async def on_elevate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not target:
         await update.message.reply_text("Usage: reply to the person's message with /elevate, or /elevate <user_id>."); return
     store.elevated_add(target, update.effective_user.id)
+    store.mod_log_add(update.effective_user.id, "elevate", target, update.effective_chat.id, "")
     await update.message.reply_text(f"✅ User {target} is now an elevated user (can /gban and /gunban across every protected group).")
 
 async def on_unelevate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -799,6 +928,7 @@ async def on_unelevate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("User id must be a number."); return
     if store.elevated_remove(target):
+        store.mod_log_add(update.effective_user.id, "unelevate", target, update.effective_chat.id, "")
         await update.message.reply_text(f"User {target} is no longer elevated.")
     else:
         await update.message.reply_text("That user wasn't elevated.")
@@ -980,9 +1110,11 @@ async def on_blacklist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if len(word) < 3:
             await update.message.reply_text("Blacklist words need at least 3 characters."); return
         store.blacklist_add(word, uid)
+        store.mod_log_add(uid, "blacklist add", None, update.effective_chat.id, word)
         await update.message.reply_text(f"✅ '{word}' is on the blacklist — in protected groups, a message containing it is deleted and the sender removed."); return
     if len(args) >= 2 and args[0].lower() == "remove":
         if store.blacklist_remove(args[1].lower()):
+            store.mod_log_add(uid, "blacklist remove", None, update.effective_chat.id, args[1].lower())
             await update.message.reply_text("Removed from the blacklist.")
         else:
             await update.message.reply_text("That word wasn't on the blacklist.")
@@ -1043,6 +1175,7 @@ async def on_banstats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"🛡 *Protection stats*\n"
         f"Protected groups: {s['groups_protected']} (+{s['groups_pending']} pending approval)\n"
         f"Global bans: {s['gbans']}\n"
+        f"AI bans: {s['ai_bans']}\n"
         f"Elevated users: {s['elevated']}\n"
         f"Verified members (all groups): {s['verified']}\n"
         f"Waiting on the safety check right now: {s['pending']}",
@@ -1663,7 +1796,7 @@ async def post_init(app: Application):
         await app.bot.set_my_short_description("Summarizes hundreds of group messages into a quick summary + AI assistant.")
         await app.bot.set_my_commands([
             ("summary","Summarize group messages"),("catchup","What you missed"),("tldr","Shrink a message (reply to it)"),
-            ("ask","Ask me anything"),("proposals","Proposals voting now"),("proposal","Proposal + tally"),("price","LUNC + USTC price"),("stats","Chain stats"),("burn","Live burn tax info"),("burnalerts","Burn notifications on/off"),("govalerts","Proposal alerts on/off"),("wallet","Public wallet lookup"),("token","CW20 token info"),("validators","Top validators"),("watchvalidator","Watch a validator"),("rank","Your rank in this chat"),("language","Choose your language"),("privacy","Privacy & security info"),("protect","Request scam protection (group admins)"),("rules","This group's rules"),("menu","Buttons menu — no typing"),("panel","Admin panel (group admins)"),("help","All commands")])
+            ("ask","Ask me anything"),("proposals","Proposals voting now"),("proposal","Proposal + tally"),("price","LUNC + USTC price"),("stats","Chain stats"),("burn","Live burn tax info"),("burnalerts","Burn notifications on/off"),("govalerts","Proposal alerts on/off"),("wallet","Public wallet lookup"),("token","CW20 token info"),("validators","Top validators"),("watchvalidator","Watch a validator"),("rank","Your rank in this chat"),("language","Choose your language"),("privacy","Privacy & security info"),("protect","Request scam protection (group admins)"),("aiban","AI-ban a user (moderators)"),("rules","This group's rules"),("menu","Buttons menu — no typing"),("panel","Admin panel (group admins)"),("help","All commands")])
         # Profile photo (owner's logo) — re-applied on boot so redeploys never lose it
         try:
             from telegram import InputProfilePhotoStatic
@@ -1727,6 +1860,10 @@ def main():
     app.add_handler(CommandHandler("gban", on_gban))
     app.add_handler(CommandHandler("gunban", on_gunban))
     app.add_handler(CommandHandler("gbans", on_gbans))
+    app.add_handler(CommandHandler("aiban", on_aiban))
+    app.add_handler(CommandHandler("aiunban", on_aiunban))
+    app.add_handler(CommandHandler("aibans", on_aibans))
+    app.add_handler(CommandHandler("modlog", on_modlog))
     app.add_handler(CommandHandler("elevate", on_elevate))
     app.add_handler(CommandHandler("unelevate", on_unelevate))
     app.add_handler(CommandHandler("elevated", on_elevated))
@@ -1750,6 +1887,7 @@ def main():
     app.add_handler(CallbackQueryHandler(on_menu_callback, pattern=r"^menu:"))
     app.add_handler(CallbackQueryHandler(on_panel_callback, pattern=r"^panel:"))
     app.add_handler(CallbackQueryHandler(on_mod_callback, pattern=r"^mod:"))
+    app.add_handler(CallbackQueryHandler(on_modundo_callback, pattern=r"^modundo:"))
     app.add_handler(CallbackQueryHandler(on_captcha_callback, pattern=r"^cap:"))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_new_members))
     app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_left_member))
