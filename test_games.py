@@ -105,10 +105,12 @@ check("short names map to the live pages",
 class FakeBot:
     def __init__(self):
         self.sent_games = []
+        self.sent_game_kwargs = []
         self.sent_messages = []
 
-    async def send_game(self, chat_id, game_short_name):
+    async def send_game(self, chat_id, game_short_name, **kwargs):
         self.sent_games.append((chat_id, game_short_name))
+        self.sent_game_kwargs.append(kwargs)
         if game_short_name == "hoops":
             raise RuntimeError("game not registered yet")
 
@@ -157,10 +159,11 @@ async def group_case():
 
 
 class FakePick:
-    def __init__(self, data):
+    def __init__(self, data, thread_id=None):
         self.data = data
         self.game_short_name = None
-        self.message = types.SimpleNamespace(chat=types.SimpleNamespace(id=-100123))
+        self.message = types.SimpleNamespace(chat=types.SimpleNamespace(id=-100123),
+                                             message_thread_id=thread_id)
         self.answer_args = None
 
     async def answer(self, **kwargs):
@@ -180,6 +183,20 @@ async def pick_case():
     check("failed pick falls back to that game's link",
           len(fake_bot.sent_messages) == 1
           and fake_bot.sent_messages[0][2]["reply_markup"].inline_keyboard[0][0].url == bot.HOOPS_URL)
+    check("non-topic pick passes no thread id",
+          fake_bot.sent_game_kwargs[0] == {} and "message_thread_id" not in fake_bot.sent_messages[0][2])
+    # Forum topic: the picker was tapped inside topic 777 — the card (and the
+    # fallback link) must carry message_thread_id so they post in that topic.
+    q3 = FakePick("pick:solitaire", thread_id=777)
+    await bot.on_pick_callback(types.SimpleNamespace(callback_query=q3),
+                               types.SimpleNamespace(bot=fake_bot))
+    check("topic pick passes the thread id to send_game",
+          fake_bot.sent_game_kwargs[-1] == {"message_thread_id": 777})
+    q4 = FakePick("pick:hoops", thread_id=777)
+    await bot.on_pick_callback(types.SimpleNamespace(callback_query=q4),
+                               types.SimpleNamespace(bot=fake_bot))
+    check("topic fallback link also carries the thread id",
+          fake_bot.sent_messages[-1][2].get("message_thread_id") == 777)
 
 
 asyncio.run(pick_case())

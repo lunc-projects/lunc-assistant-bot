@@ -659,15 +659,19 @@ async def on_pick_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     short_name = short_name.lower()
     label, url = entry
     chat_id = q.message.chat.id if q.message is not None and q.message.chat is not None else None
+    # Forum groups: the picker lives in a topic — carry its thread id through
+    # so the game card posts in the SAME topic, not the group's General area.
+    thread_id = getattr(q.message, "message_thread_id", None) if q.message is not None else None
+    thread_kw = {"message_thread_id": thread_id} if thread_id else {}
     try:
-        await ctx.bot.send_game(chat_id=chat_id, game_short_name=short_name)
+        await ctx.bot.send_game(chat_id=chat_id, game_short_name=short_name, **thread_kw)
         await q.answer()
     except Exception as e:
         print(f"pick send_game {short_name} failed: {e}")
         await q.answer(text="Couldn't post that game card — sending its link instead.")
         rows = [[InlineKeyboardButton(label, url=url)]]
         await ctx.bot.send_message(chat_id=chat_id, text="🎮 *Luna Classic games*",
-            parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(rows))
+            parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(rows), **thread_kw)
 
 async def on_game_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Telegram asks for the real game URL after a player taps Play."""
