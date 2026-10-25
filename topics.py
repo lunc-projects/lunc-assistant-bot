@@ -66,7 +66,7 @@ TOPICS = {
         "• Check any tx yourself on LuncScan by pasting its hash."),
     "wallets": (
         "👛 Wallets for Terra Classic\n"
-        "Station — station.money · Keplr — keplr.app · Cosmostation — cosmostation.io\n"
+        "Station — station.money · Keplr — keplr.app · Cosmostation — Chrome Web Store / app stores (its cosmostation.io page is only a contact stub now)\n"
         "Those are the only official sites. Look-alike domains are a top scam — type the address yourself, never follow a DM link."),
     "endpoints": (
         "🌐 Public Terra Classic endpoints\n"

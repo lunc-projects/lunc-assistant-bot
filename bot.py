@@ -520,7 +520,7 @@ Terra Classic: https://terra-classic.io (community)
 Block explorer / Finder: https://finder.terra.money/classic
 Galaxy Station wallet: https://station.terraclassic.community
 Keplr wallet: https://www.keplr.app
-Cosmostation wallet: https://cosmostation.io
+Cosmostation wallet: https://chromewebstore.google.com/detail/fpkhgmpbidmiogeglndfbkegfdlnajnf
 LUNCDash: https://luncdash.com
 LuncScan (explorer + staking guides): https://luncscan.com
 Community stats — StatsBin (chain stats + upgrade countdown): https://statsbin.com (X: https://x.com/StatsBin)
