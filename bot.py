@@ -569,18 +569,22 @@ GAMES_TEXT = (
     "🎮 *Luna Classic games*\n\n"
     "🏎 *NEON RUSH* — neon highway racer. Dodge the traffic, chain near misses, and grab LUNC + USTC coins — they're your fuel, run dry and the run ends. Global leaderboard inside the game.\n\n"
     "🃏 *SOLITAIRE* — classic Klondike. Drag cards or tap to auto-move, double-tap sends a card home. Stars light up as you get cards home.\n\n"
+    "🏀 *HOOPS* — flick Luna Classic tokens into the hoop. The little flame-haired guy does the shooting: drag back to aim, let go to throw. Baskets build a score multiplier; you've got 3 tokens and 3 minutes.\n\n"
     "Tap a game to play — in a DM the button opens the game right here in Telegram; in a group it opens the game page.")
 NEON_RUSH_URL = "https://frg-fight-club.vercel.app/neon-rush/"
 SOLITAIRE_URL = "https://frg-fight-club.vercel.app/solitaire/"
+HOOPS_URL = "https://frg-fight-club.vercel.app/hoops/"
 
 async def on_games(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat is not None and chat.type == "private":
         rows = [[InlineKeyboardButton("🏎 Play NEON RUSH", web_app=WebAppInfo(url=NEON_RUSH_URL))],
-                [InlineKeyboardButton("🃏 Play SOLITAIRE", web_app=WebAppInfo(url=SOLITAIRE_URL))]]
+                [InlineKeyboardButton("🃏 Play SOLITAIRE", web_app=WebAppInfo(url=SOLITAIRE_URL))],
+                [InlineKeyboardButton("🏀 Play HOOPS", web_app=WebAppInfo(url=HOOPS_URL))]]
     else:
         rows = [[InlineKeyboardButton("🏎 Play NEON RUSH", url=NEON_RUSH_URL)],
-                [InlineKeyboardButton("🃏 Play SOLITAIRE", url=SOLITAIRE_URL)]]
+                [InlineKeyboardButton("🃏 Play SOLITAIRE", url=SOLITAIRE_URL)],
+                [InlineKeyboardButton("🏀 Play HOOPS", url=HOOPS_URL)]]
     await update.message.reply_text(GAMES_TEXT, parse_mode=ParseMode.MARKDOWN,
         reply_markup=InlineKeyboardMarkup(rows))
 
