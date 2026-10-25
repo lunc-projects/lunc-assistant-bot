@@ -54,6 +54,7 @@ Or just @mention me in the group, or DM me
 
 *Info*
 /links — official links only
+/dex — DEXes on Luna Classic
 /safety — scam / seed phrase safety rules
 /privacy — what this bot logs, what the AI sees, what it can never do
 /learn <word> — plain-English glossary (e.g. /learn quorum)
@@ -519,6 +520,7 @@ Terra Classic: https://terra-classic.io (community)
 Block explorer / Finder: https://finder.terra.money/classic
 Galaxy Station wallet: https://station.terraclassic.community
 Keplr wallet: https://www.keplr.app
+Cosmostation wallet: https://cosmostation.io
 LUNCDash: https://luncdash.com
 LuncScan (explorer + staking guides): https://luncscan.com
 Community stats — StatsBin (chain stats + upgrade countdown): https://statsbin.com (X: https://x.com/StatsBin)
@@ -547,8 +549,20 @@ GLOSSARY = {
  "burn tax": "Terra Classic on-chain tax (live rate via /burn): currently 1.5% total, 80% burned = 1.2% of taxable flow.",
 }
 
+DEX_TEXT = """🔄 *DEXes on Luna Classic*
+• Terraport — swaps, liquidity pools, farming: https://terraport.finance
+• Terraswap Classic — the original community DEX: https://app.terraswap.io
+• Garuda DeFi DEX — built natively on Terra Classic: https://garuda-defi.org
+• CL8Y DEX: https://dex.cl8y.com
+• WESO: https://wesoworld.io
+Charts for Classic pairs: Coinhall https://coinhall.org · Vyntrex https://vyntrex.io
+⚠️ Open a DEX from your own bookmark only — fake DEX sites are a common drain. Check a pair's contract address on Finder before you swap."""
+
 async def on_links(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(LINKS_TEXT, parse_mode=ParseMode.MARKDOWN)
+
+async def on_dex(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(DEX_TEXT, parse_mode=ParseMode.MARKDOWN)
 
 async def on_safety(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(SAFETY_TEXT, parse_mode=ParseMode.MARKDOWN)
@@ -1489,6 +1503,7 @@ MENU_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("🗳 Proposals", callback_data="menu:proposals"), InlineKeyboardButton("🛡 Safety", callback_data="menu:safety")],
     [InlineKeyboardButton("🔗 Links", callback_data="menu:links"), InlineKeyboardButton("🔒 Privacy", callback_data="menu:privacy")],
     [InlineKeyboardButton("📜 Group rules", callback_data="menu:rules"), InlineKeyboardButton("❓ Group FAQ", callback_data="menu:faq")],
+    [InlineKeyboardButton("🔄 DEXes", callback_data="menu:dex")],
 ])
 
 async def on_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1511,6 +1526,8 @@ async def on_menu_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         text = SAFETY_TEXT
     elif action == "links":
         text = LINKS_TEXT
+    elif action == "dex":
+        text = DEX_TEXT
     elif action == "privacy":
         text = PRIVACY_TEXT
     elif action == "rules":
@@ -2060,7 +2077,7 @@ async def post_init(app: Application):
         await app.bot.set_my_short_description("Summarizes hundreds of group messages into a quick summary + AI assistant.")
         await app.bot.set_my_commands([
             ("summary","Summarize group messages"),("catchup","What you missed"),("tldr","Shrink a message (reply to it)"),
-            ("ask","Ask me anything"),("proposals","Proposals voting now"),("proposal","Proposal + tally"),("price","LUNC + USTC price"),("stats","Chain stats"),("burn","Live burn tax info"),("burnalerts","Burn notifications on/off"),("govalerts","Proposal alerts on/off"),("wallet","Public wallet lookup"),("token","CW20 token info"),("validators","Top validators"),("watchvalidator","Watch a validator"),("rank","Your rank in this chat"),("language","Choose your language"),("privacy","Privacy & security info"),("protect","Request scam protection (group admins)"),("aiban","AI-ban a user (moderators)"),("appeal","Appeal a ban (in DM)"),("rules","This group's rules"),("menu","Buttons menu — no typing"),("panel","Admin panel (group admins)"),("help","All commands")])
+            ("ask","Ask me anything"),("proposals","Proposals voting now"),("proposal","Proposal + tally"),("price","LUNC + USTC price"),("stats","Chain stats"),("burn","Live burn tax info"),("burnalerts","Burn notifications on/off"),("govalerts","Proposal alerts on/off"),("wallet","Public wallet lookup"),("token","CW20 token info"),("validators","Top validators"),("watchvalidator","Watch a validator"),("rank","Your rank in this chat"),("language","Choose your language"),("privacy","Privacy & security info"),("dex","DEXes on Luna Classic"),("protect","Request scam protection (group admins)"),("aiban","AI-ban a user (moderators)"),("appeal","Appeal a ban (in DM)"),("rules","This group's rules"),("menu","Buttons menu — no typing"),("panel","Admin panel (group admins)"),("help","All commands")])
         # Profile photo (owner's logo) — re-applied on boot so redeploys never lose it
         try:
             from telegram import InputProfilePhotoStatic
@@ -2108,6 +2125,7 @@ def main():
     app.add_handler(CommandHandler("stake", on_stake))
     app.add_handler(CommandHandler("calc", on_calc))
     app.add_handler(CommandHandler("links", on_links))
+    app.add_handler(CommandHandler("dex", on_dex))
     app.add_handler(CommandHandler("safety", on_safety))
     app.add_handler(CommandHandler("learn", on_learn))
     app.add_handler(CommandHandler("govalerts", on_govalerts))

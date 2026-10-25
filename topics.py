@@ -66,7 +66,7 @@ TOPICS = {
         "• Check any tx yourself on LuncScan by pasting its hash."),
     "wallets": (
         "👛 Wallets for Terra Classic\n"
-        "Station — station.money · Keplr — keplr.app\n"
+        "Station — station.money · Keplr — keplr.app · Cosmostation — cosmostation.io\n"
         "Those are the only official sites. Look-alike domains are a top scam — type the address yourself, never follow a DM link."),
     "endpoints": (
         "🌐 Public Terra Classic endpoints\n"
@@ -100,6 +100,15 @@ TOPICS = {
     "links": (
         "🔗 Official links\n"
         "The short list lives here: /links — wallets, explorers, endpoints, and community references, all in one place."),
+    "dex": (
+        "🔄 DEXes on Luna Classic\n"
+        "• Terraport — swaps, liquidity pools, farming: https://terraport.finance\n"
+        "• Terraswap Classic — the original community DEX: https://app.terraswap.io\n"
+        "• Garuda DeFi DEX — built natively on Terra Classic: https://garuda-defi.org\n"
+        "• CL8Y DEX: https://dex.cl8y.com\n"
+        "• WESO: https://wesoworld.io\n"
+        "Charts for Classic pairs: Coinhall https://coinhall.org · Vyntrex https://vyntrex.io\n"
+        "⚠️ Open a DEX from your own bookmark only — fake DEX sites are a common drain. Check a pair's contract address on Finder before you swap."),
 }
 
 ALIASES = {
@@ -109,6 +118,7 @@ ALIASES = {
     "buyluna": "tokenomics",
     "bridging": "ibctransfer", "axelar": "ibctransfer",
     "terrastation": "wallets", "station": "wallets",
+    "dexes": "dex", "swap": "dex", "trading": "dex", "exchanges": "dex",
     "ledgersetup": "ledger", "terraledger": "ledger",
     "whatisterra": "history",
 }
