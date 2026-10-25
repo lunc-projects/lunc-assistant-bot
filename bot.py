@@ -9,7 +9,7 @@ import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
-import store, ai_client, burn as burn_mod, chain, lang as lang_mod, ratelimit, budget, modquiz
+import store, ai_client, burn as burn_mod, chain, lang as lang_mod, ratelimit, budget, modquiz, topics
 from kb import kb_as_text, find_kb_answer
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -80,6 +80,11 @@ Protection means: new joiners pass a short safety check in my DM before they can
 /scamalerts on/off — this protected group gets a safety reminder every ~6 hours (group admins)
 /banstats — the protection numbers
 (Protection controls: protected-group admins, owner-appointed elevated users, and the owner.)
+
+*Hashtags & group texts*
+Type a hashtag in chat — #memo, #scammed, #ibctransfer, #safety… — and I'll answer it. #commands lists them all.
+/setrules <text> — group admins set this group's rules (/rules or #rules shows them)
+/setwelcome <text> — group admins set the note new joiners see (/welcome shows it)
 
 *Notifications (your choice, on/off)*
 /burnalerts — burn notifications menu (master on/off + types)
@@ -783,7 +788,16 @@ async def on_elevated(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def on_new_members(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
-    if chat.type not in ("group", "supergroup") or not store.mod_is_protected(chat.id): return
+    if chat.type not in ("group", "supergroup"): return
+    if not store.mod_is_protected(chat.id):
+        # Unprotected groups: just show the welcome note, if one is set.
+        w = store.get_setting(chat.id, "welcome_text")
+        if w:
+            names = ", ".join(m.first_name for m in update.message.new_chat_members if not m.is_bot)
+            if names:
+                try: await ctx.bot.send_message(chat.id, f"👋 Welcome, {names}!\n\n{w}")
+                except Exception: pass
+        return
     # Anti-raid: a surge of joins inside a short window locks the group
     # down for a while — during lockdown every new joiner is removed.
     now = int(time.time())
@@ -818,8 +832,9 @@ async def on_new_members(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             continue  # without restrict rights the gate can't hold them; the admin was warned at /protect time
         store.captcha_start(chat.id, m.id, int(time.time()) + CAPTCHA_MINUTES * 60)
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Start the safety check", url=f"https://t.me/{ctx.bot.username}?start=captcha")]])
+        w = store.get_setting(chat.id, "welcome_text")
         try:
-            await ctx.bot.send_message(chat.id, f"👋 Welcome, {m.first_name}! This group is protected against scams. To start chatting, tap the button, then Start in my DM and pass a short safety check within {CAPTCHA_MINUTES} minutes.", reply_markup=kb)
+            await ctx.bot.send_message(chat.id, f"👋 Welcome, {m.first_name}! This group is protected against scams. To start chatting, tap the button, then Start in my DM and pass a short safety check within {CAPTCHA_MINUTES} minutes." + (f"\n\n{w}" if w else ""), reply_markup=kb)
         except Exception: pass
 
 async def on_left_member(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1008,6 +1023,72 @@ async def on_banstats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"Verified members (all groups): {s['verified']}\n"
         f"Waiting on the safety check right now: {s['pending']}",
         parse_mode=ParseMode.MARKDOWN)
+
+# --- Lunetta-style additions (2026-10-25): hashtags, group rules/welcome ---
+
+HASHTAG_RE = re.compile(r"#(\w+)")
+TAG_COOLDOWN = {}  # (chat_id, tag) -> ts; one answer per tag per chat per minute
+
+def _first_hashtag(text):
+    for t in HASHTAG_RE.findall(text or ""):
+        if topics.known(t):
+            return t.lower()
+    return None
+
+async def _hashtag_answer(update, tag):
+    now = int(time.time())
+    chat_id = update.effective_chat.id
+    key = (chat_id, tag)
+    if now - TAG_COOLDOWN.get(key, 0) < 60:
+        return None
+    if tag == "commands":
+        ans = topics.commands_text()
+    elif tag == "rules":
+        ans = store.get_setting(chat_id, "rules_text") or "No rules set for this group yet — an admin can set them with /setrules <text>."
+    elif tag == "welcome":
+        ans = store.get_setting(chat_id, "welcome_text") or "No welcome note set for this group yet — an admin can set one with /setwelcome <text>."
+    else:
+        ans = topics.lookup(tag)
+    if ans:
+        TAG_COOLDOWN[key] = now
+    return ans
+
+async def _set_group_text(update, ctx, key, label, show_cmd):
+    chat = update.effective_chat
+    if chat.type not in ("group", "supergroup"):
+        await update.message.reply_text(f"Set the {label} inside the group."); return
+    if not await _can_change(update, ctx):
+        await update.message.reply_text(f"Only group admins can set the {label}."); return
+    text = " ".join(ctx.args or []).strip()
+    if update.message.reply_to_message and update.message.reply_to_message.text:
+        text = update.message.reply_to_message.text.strip()
+    if not text:
+        await update.message.reply_text(f"Usage: /set{label} <text> — or reply to a message with /set{label} to use its text. /set{label} clear removes it."); return
+    if text.lower() == "clear":
+        store.set_setting(chat.id, key, "")
+        await update.message.reply_text(f"{label.capitalize()} cleared."); return
+    store.set_setting(chat.id, key, text[:2000])
+    await update.message.reply_text(f"Saved — anyone can see it with {show_cmd}.")
+
+async def on_setrules(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await _set_group_text(update, ctx, "rules_text", "rules", "/rules or #rules")
+
+async def on_rules(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if chat.type not in ("group", "supergroup"):
+        await update.message.reply_text("Rules live in groups."); return
+    text = store.get_setting(chat.id, "rules_text")
+    await update.message.reply_text(("📜 Group rules\n\n" + text) if text else "No rules set for this group yet — an admin can set them with /setrules <text>.")
+
+async def on_setwelcome(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await _set_group_text(update, ctx, "welcome_text", "welcome", "/welcome")
+
+async def on_welcome(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if chat.type not in ("group", "supergroup"):
+        await update.message.reply_text("Welcome notes live in groups."); return
+    text = store.get_setting(chat.id, "welcome_text")
+    await update.message.reply_text(text if text else "No welcome note set for this group yet — an admin can set one with /setwelcome <text>.")
 
 async def on_learn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
@@ -1236,6 +1317,14 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Log group messages for summaries
     if chat.type in ("group", "supergroup"):
         store.log_message(chat.id, user.id, name, text, update.message.message_id)
+    # Hashtag topics (groups): #memo, #scammed, ... get a ready answer
+    if chat.type in ("group", "supergroup"):
+        _tag = _first_hashtag(text)
+        if _tag:
+            _ans = await _hashtag_answer(update, _tag)
+            if _ans:
+                await update.message.reply_text(_ans)
+                return
     # Mention = ask
     bot_name = (await ctx.bot.get_me()).username
     if bot_name and f"@{bot_name}" in text:
@@ -1268,7 +1357,7 @@ async def post_init(app: Application):
         await app.bot.set_my_short_description("Summarizes hundreds of group messages into a quick summary + AI assistant.")
         await app.bot.set_my_commands([
             ("summary","Summarize group messages"),("catchup","What you missed"),("tldr","Shrink a message (reply to it)"),
-            ("ask","Ask me anything"),("proposals","Proposals voting now"),("proposal","Proposal + tally"),("price","LUNC + USTC price"),("stats","Chain stats"),("burn","Live burn tax info"),("burnalerts","Burn notifications on/off"),("govalerts","Proposal alerts on/off"),("wallet","Public wallet lookup"),("token","CW20 token info"),("validators","Top validators"),("watchvalidator","Watch a validator"),("rank","Your rank in this chat"),("language","Choose your language"),("privacy","Privacy & security info"),("protect","Request scam protection (group admins)"),("help","All commands")])
+            ("ask","Ask me anything"),("proposals","Proposals voting now"),("proposal","Proposal + tally"),("price","LUNC + USTC price"),("stats","Chain stats"),("burn","Live burn tax info"),("burnalerts","Burn notifications on/off"),("govalerts","Proposal alerts on/off"),("wallet","Public wallet lookup"),("token","CW20 token info"),("validators","Top validators"),("watchvalidator","Watch a validator"),("rank","Your rank in this chat"),("language","Choose your language"),("privacy","Privacy & security info"),("protect","Request scam protection (group admins)"),("rules","This group's rules"),("help","All commands")])
         # Profile photo (owner's logo) — re-applied on boot so redeploys never lose it
         try:
             from telegram import InputProfilePhotoStatic
@@ -1341,6 +1430,10 @@ def main():
     app.add_handler(CommandHandler("raid", on_raid))
     app.add_handler(CommandHandler("scamalerts", on_scamalerts))
     app.add_handler(CommandHandler("banstats", on_banstats))
+    app.add_handler(CommandHandler("setrules", on_setrules))
+    app.add_handler(CommandHandler("rules", on_rules))
+    app.add_handler(CommandHandler("setwelcome", on_setwelcome))
+    app.add_handler(CommandHandler("welcome", on_welcome))
     app.add_handler(CallbackQueryHandler(on_captcha_callback, pattern=r"^cap:"))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_new_members))
     app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_left_member))
