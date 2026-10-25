@@ -6,10 +6,10 @@ Run: TELEGRAM_BOT_TOKEN=... AI_API_KEY=... python bot.py
 """
 import os, re, time, json, datetime, pathlib
 import httpx
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
-import store, ai_client, burn as burn_mod, chain, lang as lang_mod, ratelimit, budget
+import store, ai_client, burn as burn_mod, chain, lang as lang_mod, ratelimit, budget, modquiz
 from kb import kb_as_text, find_kb_answer
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -69,6 +69,13 @@ Rank is earned by chatting on distinct days (not message count). Owner: /rankset
 *AI in this group*
 Group admins can turn AI off or on for this group only: /aioff, /aion. Default is on.
 
+*Group protection (opt-in)*
+/protect — group admins: request scam protection for this group (the owner approves it)
+Protection means: new joiners pass a short safety check in my DM before they can post · accounts on the network's global scam-ban list are removed on sight · a member whose first message contains a link is removed
+/gban — reply to a scammer's message (or /gban <user id>): ban them from every protected group
+/gunban <user id> — lift a global ban · /gbans — see the ban list
+(Protection controls: protected-group admins, owner-appointed elevated users, and the owner.)
+
 *Notifications (your choice, on/off)*
 /burnalerts — burn notifications menu (master on/off + types)
 /govalerts — proposal / voting notifications menu (new, ending soon, result)
@@ -124,6 +131,14 @@ def user_lang(update):
     return store.get_user_lang(update.effective_user.id)
 
 async def on_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    # Captcha entry: a muted new joiner in a protected group lands here.
+    pend = store.captcha_for_user(update.effective_user.id)
+    if pend is not None:
+        await _start_quiz(update, ctx, pend)
+        return
+    if ctx.args and ctx.args[0] == "captcha":
+        await update.message.reply_text("You don't have a pending safety check right now. If you just joined a protected group, tap the button in the group's welcome message to start it.")
+        return
     lg = user_lang(update)
     await update.message.reply_text(lang_mod.t("intro", lg), reply_markup=lang_mod.lang_keyboard())
 
@@ -513,11 +528,12 @@ async def on_safety(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 PRIVACY_TEXT = (
     "🔒 *Privacy & security — what this bot does*\n\n"
-    "• *It cannot move funds.* The bot has no wallet, no private keys, and no signing or sending code anywhere. Every command is a read-only lookup or a settings toggle.\n\n"
-    "• *What it logs:* in groups, message text is kept for 7 days so /summary and /catchup can work, then deleted automatically (a server restart wipes it sooner). Your rank counts the days you chat — commands don't count.\n\n"
+    "• *It cannot move funds.* The bot has no wallet, no private keys, and no signing or sending code anywhere. Commands are read-only lookups and settings toggles — plus, only in groups that opted into protection (below), basic moderation actions.\n\n"
+    "• *What it logs:* in groups, message text is kept for 7 days so /summary and /catchup can work, then deleted automatically. Your rank counts the days you chat — commands don't count.\n\n"
     "• *What the AI sees:* only when someone uses an AI feature (/ask, /summary, mentions, DM summaries). Then the AI service (Groq) receives the message text and usernames needed for that one answer. Simple commands (/price, /validators, …) send nothing anywhere.\n\n"
     "• *Your group's controls:* group admins run this group — including AI on/off (/aioff, /aion), alert settings, and notification choices. Usage stats are owner-only.\n\n"
     "• *The limits:* ranks, daily AI caps, and a hard daily token budget (200,000/day) mean the AI quota can't be drained by spam — the worst case is AI pausing until midnight UTC.\n\n"
+    "• *Group protection (opt-in):* in groups whose admins registered with /protect and the owner approved, new joiners pass a short safety check before they can post, accounts on the network's global scam-ban list are removed on sight, and a member whose first message contains a link is removed. Protected-group admins, owner-appointed elevated users, and the owner control the ban list.\n\n"
     "• *Don't take our word for it:* the bot's code is public — read exactly what it does: github.com/lunc-projects/lunc-assistant-bot")
 
 async def on_privacy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -539,6 +555,305 @@ async def on_aion(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def on_aioff(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await _ai_toggle(update, ctx, False)
+
+# --- Group protection (Phase 1 moderation, 2026-10-25) ---
+# Opt-in, owner-approved scam protection for Luna Classic groups,
+# modeled on Cosmobot's setup: groups register (owner approves),
+# new joiners pass a DM captcha gate, a scammer banned in one
+# protected group is banned in all of them, and a first message
+# containing a link gets the sender removed. The bot needs admin
+# (restrict + delete) in each protected group. Still no wallet,
+# no keys, and no fund-moving code anywhere in this bot.
+
+CAPTCHA_MINUTES = 10
+FULL_PERMS = ChatPermissions(
+    can_send_messages=True, can_send_audios=True, can_send_documents=True,
+    can_send_photos=True, can_send_videos=True, can_send_video_notes=True,
+    can_send_voice_notes=True, can_send_polls=True, can_send_other_messages=True,
+    can_add_web_page_previews=True, can_invite_users=True)
+NO_PERMS = ChatPermissions()
+QUIZ = {}  # user_id -> {"chat_id", "items", "idx"}; in-memory only — the pending row + deadline persist in the store
+LINK_RE = re.compile(r"(https?://|www\.|t\.me/)", re.I)
+
+def _is_owner(user_id):
+    return OWNER_ID is not None and user_id == OWNER_ID
+
+async def _is_group_admin(ctx, chat_id, user_id):
+    try:
+        m = await ctx.bot.get_chat_member(chat_id, user_id)
+        return m.status in ("administrator", "creator")
+    except Exception:
+        return False
+
+async def _can_moderate(update, ctx):
+    uid = update.effective_user.id
+    if _is_owner(uid) or store.is_elevated(uid):
+        return True
+    chat = update.effective_chat
+    if chat.type in ("group", "supergroup") and store.mod_is_protected(chat.id):
+        return await _is_group_admin(ctx, chat.id, uid)
+    return False
+
+async def _owner_only(update):
+    if _is_owner(update.effective_user.id):
+        return True
+    await update.message.reply_text("Owner only.")
+    return False
+
+async def on_protect(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if chat.type not in ("group", "supergroup"):
+        await update.message.reply_text("Run /protect inside the group you want protected."); return
+    if not await _can_change(update, ctx):
+        await update.message.reply_text("Only group admins can request protection."); return
+    row = store.mod_group(chat.id)
+    if row is not None and row["approved"]:
+        await update.message.reply_text("🛡 This group is already protected."); return
+    store.mod_request_group(chat.id, chat.title or "", update.effective_user.id)
+    missing = []
+    try:
+        me = await ctx.bot.get_chat_member(chat.id, ctx.bot.id)
+        if me.status != "administrator":
+            missing.append("make the bot an admin")
+        else:
+            if not getattr(me, "can_restrict_members", False): missing.append("'restrict members' permission")
+            if not getattr(me, "can_delete_messages", False): missing.append("'delete messages' permission")
+    except Exception:
+        missing.append("(couldn't verify the bot's admin rights)")
+    note = ("\n⚠️ Still needed for the gate to work: " + ", ".join(missing) + ".") if missing else ""
+    await update.message.reply_text("🛡 Protection requested — the bot owner has been notified for approval." + note)
+    if OWNER_ID:
+        try:
+            await ctx.bot.send_message(OWNER_ID, f"🛡 Protection request: {chat.title} (chat id {chat.id}), requested by user {update.effective_user.id}.\nApprove: /approve {chat.id}\nDeny: /deny {chat.id}")
+        except Exception:
+            pass
+
+async def on_unprotect(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if chat.type not in ("group", "supergroup"):
+        await update.message.reply_text("Run /unprotect inside the group."); return
+    if not (_is_owner(update.effective_user.id) or await _can_change(update, ctx)):
+        await update.message.reply_text("Only group admins (or the owner) can remove protection."); return
+    if store.mod_remove_group(chat.id):
+        await update.message.reply_text("Protection removed — this group is no longer in the network.")
+    else:
+        await update.message.reply_text("This group wasn't registered.")
+
+async def on_approve(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await _owner_only(update): return
+    if not ctx.args:
+        await update.message.reply_text("Usage: /approve <chat_id>"); return
+    try: chat_id = int(ctx.args[0])
+    except ValueError:
+        await update.message.reply_text("Chat id must be a number."); return
+    if store.mod_approve_group(chat_id):
+        await update.message.reply_text(f"✅ Group {chat_id} approved — protection is ON.")
+        try: await ctx.bot.send_message(chat_id, "🛡 Protection is ON for this group: new joiners pass a short safety check before they can post, known scammers are removed automatically, and a first message containing a link gets the sender removed.")
+        except Exception: pass
+    else:
+        await update.message.reply_text("No pending or registered group with that id.")
+
+async def on_deny(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await _owner_only(update): return
+    if not ctx.args:
+        await update.message.reply_text("Usage: /deny <chat_id>"); return
+    try: chat_id = int(ctx.args[0])
+    except ValueError:
+        await update.message.reply_text("Chat id must be a number."); return
+    if store.mod_remove_group(chat_id):
+        await update.message.reply_text(f"Group {chat_id} removed from the list.")
+    else:
+        await update.message.reply_text("No group with that id.")
+
+async def on_groups(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await _owner_only(update): return
+    rows = store.mod_groups(approved_only=False)
+    if not rows:
+        await update.message.reply_text("No groups registered or pending."); return
+    lines = ["*Protection network*"]
+    for r in rows:
+        lines.append(f"{'🛡' if r['approved'] else '⏳ pending'} {r['title'] or '(no title)'} — chat id {r['chat_id']}")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+async def _apply_gban(ctx, target_id, ban):
+    ok = fail = 0
+    for g in store.mod_groups():
+        try:
+            if ban:
+                await ctx.bot.ban_chat_member(g["chat_id"], target_id)
+            else:
+                await ctx.bot.unban_chat_member(g["chat_id"], target_id, only_if_banned=True)
+            ok += 1
+        except Exception:
+            fail += 1
+    return ok, fail
+
+def _mod_target(update, ctx):
+    """Reply-target wins; else a numeric first argument."""
+    if update.message.reply_to_message and update.message.reply_to_message.from_user:
+        return update.message.reply_to_message.from_user.id, " ".join(ctx.args or [])
+    if ctx.args:
+        try: return int(ctx.args[0]), " ".join(ctx.args[1:])
+        except ValueError: return None, ""
+    return None, ""
+
+async def on_gban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await _can_moderate(update, ctx):
+        await update.message.reply_text("Only the owner, elevated users, or admins of a protected group can do this."); return
+    target, reason = _mod_target(update, ctx)
+    if not target:
+        await update.message.reply_text("Usage: reply to the scammer's message with /gban [reason], or /gban <user_id> [reason]."); return
+    if _is_owner(target):
+        await update.message.reply_text("That user can't be banned."); return
+    store.gban_add(target, reason, update.effective_user.id)
+    ok, fail = await _apply_gban(ctx, target, True)
+    await update.message.reply_text(f"🚫 User {target} is now globally banned — removed from {ok} protected group(s)" + (f" ({fail} failed — the bot may lack admin rights there)" if fail else "") + ".")
+
+async def on_gunban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await _can_moderate(update, ctx):
+        await update.message.reply_text("Only the owner, elevated users, or admins of a protected group can do this."); return
+    if not ctx.args:
+        await update.message.reply_text("Usage: /gunban <user_id>"); return
+    try: target = int(ctx.args[0])
+    except ValueError:
+        await update.message.reply_text("User id must be a number."); return
+    if not store.gban_remove(target):
+        await update.message.reply_text("That user isn't on the global ban list."); return
+    ok, fail = await _apply_gban(ctx, target, False)
+    await update.message.reply_text(f"✅ User {target} removed from the global ban list and unbanned in {ok} group(s)" + (f" ({fail} failed)" if fail else "") + ".")
+
+async def on_gbans(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await _can_moderate(update, ctx):
+        await update.message.reply_text("Only the owner, elevated users, or admins of a protected group can see this."); return
+    rows = store.gban_all()
+    if not rows:
+        await update.message.reply_text("The global ban list is empty."); return
+    lines = [f"*Global ban list ({len(rows)})*"]
+    for r in rows[:30]:
+        lines.append(f"• {r['user_id']}" + (f" — {r['reason']}" if r["reason"] else ""))
+    if len(rows) > 30: lines.append(f"…and {len(rows) - 30} more")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+async def on_elevate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await _owner_only(update): return
+    if not ctx.args:
+        await update.message.reply_text("Usage: /elevate <user_id>"); return
+    try: target = int(ctx.args[0])
+    except ValueError:
+        await update.message.reply_text("User id must be a number."); return
+    store.elevated_add(target, update.effective_user.id)
+    await update.message.reply_text(f"✅ User {target} is now an elevated user (can /gban and /gunban across every protected group).")
+
+async def on_unelevate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await _owner_only(update): return
+    if not ctx.args:
+        await update.message.reply_text("Usage: /unelevate <user_id>"); return
+    try: target = int(ctx.args[0])
+    except ValueError:
+        await update.message.reply_text("User id must be a number."); return
+    if store.elevated_remove(target):
+        await update.message.reply_text(f"User {target} is no longer elevated.")
+    else:
+        await update.message.reply_text("That user wasn't elevated.")
+
+async def on_elevated(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await _owner_only(update): return
+    rows = store.elevated_all()
+    if not rows:
+        await update.message.reply_text("No elevated users yet. Add one with /elevate <user_id>."); return
+    await update.message.reply_text("Elevated users: " + ", ".join(str(r["user_id"]) for r in rows))
+
+async def on_new_members(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if chat.type not in ("group", "supergroup") or not store.mod_is_protected(chat.id): return
+    for m in update.message.new_chat_members:
+        if m.is_bot: continue
+        if _is_owner(m.id): continue
+        if store.gban_get(m.id):
+            try: await ctx.bot.ban_chat_member(chat.id, m.id)
+            except Exception: pass
+            continue
+        if store.member_is_verified(chat.id, m.id): continue
+        if await _is_group_admin(ctx, chat.id, m.id):
+            store.member_verify(chat.id, m.id); continue
+        try:
+            await ctx.bot.restrict_chat_member(chat.id, m.id, permissions=NO_PERMS)
+        except Exception:
+            continue  # without restrict rights the gate can't hold them; the admin was warned at /protect time
+        store.captcha_start(chat.id, m.id, int(time.time()) + CAPTCHA_MINUTES * 60)
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Start the safety check", url=f"https://t.me/{ctx.bot.username}?start=captcha")]])
+        try:
+            await ctx.bot.send_message(chat.id, f"👋 Welcome, {m.first_name}! This group is protected against scams. To start chatting, tap the button, then Start in my DM and pass a short safety check within {CAPTCHA_MINUTES} minutes.", reply_markup=kb)
+        except Exception: pass
+
+async def on_left_member(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    left = update.message.left_chat_member
+    if left:
+        store.captcha_clear(update.effective_chat.id, left.id)
+        QUIZ.pop(left.id, None)
+
+async def _start_quiz(update, ctx, pend):
+    sess = {"chat_id": pend["chat_id"], "items": modquiz.build_quiz(), "idx": 0}
+    QUIZ[update.effective_user.id] = sess
+    g = store.mod_group(pend["chat_id"])
+    title = g["title"] if g else "the group"
+    await update.message.reply_text(f"🛡 Safety check for *{title}* — {len(sess['items'])} quick questions. Get them all right to unlock chatting.", parse_mode=ParseMode.MARKDOWN)
+    await _quiz_send(update.message.reply_text, sess)
+
+async def _quiz_send(reply_fn, sess):
+    item = sess["items"][sess["idx"]]
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton(opt, callback_data=f"cap:{sess['idx']}:{i}")] for i, opt in enumerate(item["options"])])
+    await reply_fn(f"Question {sess['idx'] + 1} of {len(sess['items'])}\n\n{item['prompt']}", reply_markup=kb)
+
+async def on_captcha_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    uid = q.from_user.id
+    sess = QUIZ.get(uid)
+    if not sess:
+        await q.answer("This check has expired — rejoin the group and tap the button there to start again.", show_alert=True); return
+    try:
+        _, idx_s, choice_s = q.data.split(":")
+        idx, choice = int(idx_s), int(choice_s)
+    except Exception:
+        await q.answer("Out of date — use the latest question."); return
+    if idx != sess["idx"]:
+        await q.answer("Out of date — use the latest question."); return
+    if store.captcha_get(sess["chat_id"], uid) is None:
+        QUIZ.pop(uid, None)
+        await q.answer("This check has expired — rejoin the group and tap the button there to start again.", show_alert=True); return
+    item = sess["items"][idx]
+    if choice != item["answer"]:
+        QUIZ.pop(uid, None)
+        await q.answer("❌ That's not the safe answer.", show_alert=True)
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("↻ Try the check again", url=f"https://t.me/{ctx.bot.username}?start=captcha")]])
+        try: await q.edit_message_text("❌ That answer isn't right, so this attempt ends here. Tap below and try again before your time in the group runs out.", reply_markup=kb)
+        except Exception: pass
+        return
+    sess["idx"] += 1
+    if sess["idx"] < len(sess["items"]):
+        await q.answer("✅ Correct")
+        try: await q.edit_message_text(f"✅ Correct — {sess['idx']} of {len(sess['items'])} done.")
+        except Exception: pass
+        await _quiz_send(q.message.reply_text, sess)
+        return
+    chat_id = sess["chat_id"]
+    QUIZ.pop(uid, None)
+    store.captcha_clear(chat_id, uid)
+    store.member_verify(chat_id, uid)
+    try: await ctx.bot.restrict_chat_member(chat_id, uid, permissions=FULL_PERMS)
+    except Exception: pass
+    await q.answer("✅ You passed!")
+    try: await q.edit_message_text("✅ You passed the safety check — you can chat in the group now. Stay safe: no real admin will ever DM you asking for a seed phrase or a wallet approval.")
+    except Exception: pass
+
+async def job_captcha_sweep(ctx: ContextTypes.DEFAULT_TYPE):
+    for row in store.captcha_expired(int(time.time())):
+        try:
+            await ctx.bot.ban_chat_member(row["chat_id"], row["user_id"])
+            await ctx.bot.unban_chat_member(row["chat_id"], row["user_id"], only_if_banned=True)
+        except Exception: pass
+        store.captcha_clear(row["chat_id"], row["user_id"])
+        QUIZ.pop(row["user_id"], None)
 
 async def on_learn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
@@ -741,6 +1056,22 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text: return
     chat, user, text = update.effective_chat, update.effective_user, update.message.text
     name = user.full_name + (f" (@{user.username})" if user.username else "")
+    # Group protection: in a protected group, a member whose FIRST tracked
+    # message contains a link is removed (Cosmobot's anti-scam rule).
+    # Runs before logging, so a deleted scam message never reaches summaries.
+    if chat.type in ("group", "supergroup") and not user.is_bot and store.mod_is_protected(chat.id):
+        if store.first_msg_mark(chat.id, user.id):
+            has_link = any(e.type in ("url", "text_link") for e in (update.message.entities or [])) or bool(LINK_RE.search(text))
+            if has_link and not _is_owner(user.id) and not store.is_elevated(user.id) and not await _is_group_admin(ctx, chat.id, user.id):
+                try: await update.message.delete()
+                except Exception: pass
+                try:
+                    await ctx.bot.ban_chat_member(chat.id, user.id)
+                    await ctx.bot.unban_chat_member(chat.id, user.id, only_if_banned=True)
+                except Exception: pass
+                try: await ctx.bot.send_message(chat.id, "🚫 A member was removed: their first message here contained a link (anti-scam protection). They may rejoin and try again.")
+                except Exception: pass
+                return
     # Log group messages for summaries
     if chat.type in ("group", "supergroup"):
         store.log_message(chat.id, user.id, name, text, update.message.message_id)
@@ -776,7 +1107,7 @@ async def post_init(app: Application):
         await app.bot.set_my_short_description("Summarizes hundreds of group messages into a quick summary + AI assistant.")
         await app.bot.set_my_commands([
             ("summary","Summarize group messages"),("catchup","What you missed"),("tldr","Shrink a message (reply to it)"),
-            ("ask","Ask me anything"),("proposals","Proposals voting now"),("proposal","Proposal + tally"),("price","LUNC + USTC price"),("stats","Chain stats"),("burn","Live burn tax info"),("burnalerts","Burn notifications on/off"),("govalerts","Proposal alerts on/off"),("wallet","Public wallet lookup"),("token","CW20 token info"),("validators","Top validators"),("watchvalidator","Watch a validator"),("rank","Your rank in this chat"),("language","Choose your language"),("privacy","Privacy & security info"),("help","All commands")])
+            ("ask","Ask me anything"),("proposals","Proposals voting now"),("proposal","Proposal + tally"),("price","LUNC + USTC price"),("stats","Chain stats"),("burn","Live burn tax info"),("burnalerts","Burn notifications on/off"),("govalerts","Proposal alerts on/off"),("wallet","Public wallet lookup"),("token","CW20 token info"),("validators","Top validators"),("watchvalidator","Watch a validator"),("rank","Your rank in this chat"),("language","Choose your language"),("privacy","Privacy & security info"),("protect","Request scam protection (group admins)"),("help","All commands")])
         # Profile photo (owner's logo) — re-applied on boot so redeploys never lose it
         try:
             from telegram import InputProfilePhotoStatic
@@ -832,6 +1163,20 @@ def main():
     app.add_handler(CommandHandler("privacy", on_privacy))
     app.add_handler(CommandHandler("aion", on_aion))
     app.add_handler(CommandHandler("aioff", on_aioff))
+    app.add_handler(CommandHandler("protect", on_protect))
+    app.add_handler(CommandHandler("unprotect", on_unprotect))
+    app.add_handler(CommandHandler("approve", on_approve))
+    app.add_handler(CommandHandler("deny", on_deny))
+    app.add_handler(CommandHandler("groups", on_groups))
+    app.add_handler(CommandHandler("gban", on_gban))
+    app.add_handler(CommandHandler("gunban", on_gunban))
+    app.add_handler(CommandHandler("gbans", on_gbans))
+    app.add_handler(CommandHandler("elevate", on_elevate))
+    app.add_handler(CommandHandler("unelevate", on_unelevate))
+    app.add_handler(CommandHandler("elevated", on_elevated))
+    app.add_handler(CallbackQueryHandler(on_captcha_callback, pattern=r"^cap:"))
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_new_members))
+    app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_left_member))
     app.add_handler(CallbackQueryHandler(on_burn_callback, pattern=r"^burn:"))
     app.add_handler(CallbackQueryHandler(on_gov_callback, pattern=r"^gov:"))
     app.add_handler(CallbackQueryHandler(on_lang_callback, pattern=r"^lang:"))
@@ -840,6 +1185,7 @@ def main():
         app.job_queue.run_repeating(job_burn_check, interval=3600, first=120)
         app.job_queue.run_repeating(job_gov_check, interval=1800, first=180)
         app.job_queue.run_repeating(job_validator_check, interval=3600, first=240)
+        app.job_queue.run_repeating(job_captcha_sweep, interval=60, first=30)
         import datetime as _dt
         app.job_queue.run_daily(job_burn_daily, time=_dt.time(hour=1, minute=0))  # ~9pm ET (UTC-4), shifts 1h in winter
     print("LUNC Assistant Bot polling…")

@@ -16,6 +16,7 @@ def _conn():
     c.execute("""CREATE TABLE IF NOT EXISTS user_lang(
         user_id INTEGER PRIMARY KEY, lang TEXT)""")
     _ensure_rank_tables(c)
+    _ensure_mod_tables(c)
     return c
 
 # --- Per-user language (personal choice: never a group setting) ---
@@ -191,7 +192,7 @@ def _ensure_rank_tables(c):
         chat_id INTEGER, user_id INTEGER, rank INTEGER, set_by INTEGER, ts INTEGER,
         PRIMARY KEY(chat_id, user_id))""")
     # Idempotent seed from the surviving message log (helps after a restart;
-    # a redeploy wipes the whole DB anyway, like everything else here).
+    # the DB itself persists across redeploys via the /data volume).
     c.execute("""INSERT OR IGNORE INTO rank_days(chat_id, user_id, day)
                  SELECT chat_id, user_id, date(ts, 'unixepoch')
                  FROM messages WHERE user_id IS NOT NULL""")
@@ -240,3 +241,161 @@ def clear_rank_override(chat_id, user_id):
     c = _conn()
     cur = c.execute("DELETE FROM rank_override WHERE chat_id=? AND user_id=?", (chat_id, user_id))
     c.commit(); n = cur.rowcount; c.close(); return n
+
+
+# --- Group protection (Phase 1 moderation, 2026-10-25) ---
+# Cosmobot-style setup for Luna Classic groups, owner-approved design:
+# groups opt in via a request the OWNER approves; registered groups get
+# a captcha gate for new joiners, a shared global scam-ban list, and
+# first-message link removal. All state lives in this same DB, which
+# sits on a persistent volume — the registry and ban list survive
+# redeploys.
+
+def _ensure_mod_tables(c):
+    c.execute("""CREATE TABLE IF NOT EXISTS mod_groups(
+        chat_id INTEGER PRIMARY KEY, title TEXT, requested_by INTEGER,
+        approved INTEGER, ts INTEGER)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS gbans(
+        user_id INTEGER PRIMARY KEY, reason TEXT, banned_by INTEGER, ts INTEGER)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS elevated_users(
+        user_id INTEGER PRIMARY KEY, added_by INTEGER, ts INTEGER)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS captcha_pending(
+        chat_id INTEGER, user_id INTEGER, deadline INTEGER,
+        PRIMARY KEY(chat_id, user_id))""")
+    c.execute("""CREATE TABLE IF NOT EXISTS members_verified(
+        chat_id INTEGER, user_id INTEGER, ts INTEGER,
+        PRIMARY KEY(chat_id, user_id))""")
+    c.execute("""CREATE TABLE IF NOT EXISTS first_msg_seen(
+        chat_id INTEGER, user_id INTEGER,
+        PRIMARY KEY(chat_id, user_id))""")
+
+import time as _time
+
+def mod_request_group(chat_id, title, requested_by):
+    c = _conn()
+    c.execute("""INSERT INTO mod_groups(chat_id, title, requested_by, approved, ts)
+                 VALUES(?, ?, ?, 0, ?)
+                 ON CONFLICT(chat_id) DO UPDATE SET title=excluded.title""",
+              (chat_id, title, requested_by, int(_time.time())))
+    c.commit(); c.close()
+
+def mod_approve_group(chat_id):
+    c = _conn()
+    cur = c.execute("UPDATE mod_groups SET approved=1 WHERE chat_id=?", (chat_id,))
+    c.commit(); n = cur.rowcount; c.close(); return n
+
+def mod_remove_group(chat_id):
+    c = _conn()
+    cur = c.execute("DELETE FROM mod_groups WHERE chat_id=?", (chat_id,))
+    c.commit(); n = cur.rowcount; c.close(); return n
+
+def mod_group(chat_id):
+    c = _conn()
+    r = c.execute("SELECT * FROM mod_groups WHERE chat_id=?", (chat_id,)).fetchone()
+    c.close(); return r
+
+def mod_is_protected(chat_id):
+    r = mod_group(chat_id)
+    return bool(r and r["approved"])
+
+def mod_groups(approved_only=True):
+    c = _conn()
+    if approved_only:
+        rows = c.execute("SELECT * FROM mod_groups WHERE approved=1 ORDER BY chat_id").fetchall()
+    else:
+        rows = c.execute("SELECT * FROM mod_groups ORDER BY approved, chat_id").fetchall()
+    c.close(); return rows
+
+def gban_add(user_id, reason, banned_by):
+    c = _conn()
+    c.execute("""INSERT INTO gbans(user_id, reason, banned_by, ts) VALUES(?, ?, ?, ?)
+                 ON CONFLICT(user_id) DO UPDATE SET reason=excluded.reason,
+                 banned_by=excluded.banned_by, ts=excluded.ts""",
+              (user_id, reason or "", banned_by, int(_time.time())))
+    c.commit(); c.close()
+
+def gban_remove(user_id):
+    c = _conn()
+    cur = c.execute("DELETE FROM gbans WHERE user_id=?", (user_id,))
+    c.commit(); n = cur.rowcount; c.close(); return n
+
+def gban_get(user_id):
+    c = _conn()
+    r = c.execute("SELECT * FROM gbans WHERE user_id=?", (user_id,)).fetchone()
+    c.close(); return r
+
+def gban_all():
+    c = _conn()
+    rows = c.execute("SELECT * FROM gbans ORDER BY ts DESC").fetchall()
+    c.close(); return rows
+
+def elevated_add(user_id, added_by):
+    c = _conn()
+    c.execute("""INSERT INTO elevated_users(user_id, added_by, ts) VALUES(?, ?, ?)
+                 ON CONFLICT(user_id) DO NOTHING""",
+              (user_id, added_by, int(_time.time())))
+    c.commit(); c.close()
+
+def elevated_remove(user_id):
+    c = _conn()
+    cur = c.execute("DELETE FROM elevated_users WHERE user_id=?", (user_id,))
+    c.commit(); n = cur.rowcount; c.close(); return n
+
+def is_elevated(user_id):
+    c = _conn()
+    r = c.execute("SELECT user_id FROM elevated_users WHERE user_id=?", (user_id,)).fetchone()
+    c.close(); return r is not None
+
+def elevated_all():
+    c = _conn()
+    rows = c.execute("SELECT * FROM elevated_users ORDER BY ts").fetchall()
+    c.close(); return rows
+
+def captcha_start(chat_id, user_id, deadline):
+    c = _conn()
+    c.execute("""INSERT INTO captcha_pending(chat_id, user_id, deadline) VALUES(?, ?, ?)
+                 ON CONFLICT(chat_id, user_id) DO UPDATE SET deadline=excluded.deadline""",
+              (chat_id, user_id, deadline))
+    c.commit(); c.close()
+
+def captcha_get(chat_id, user_id):
+    c = _conn()
+    r = c.execute("SELECT * FROM captcha_pending WHERE chat_id=? AND user_id=?",
+                  (chat_id, user_id)).fetchone()
+    c.close(); return r
+
+def captcha_for_user(user_id):
+    c = _conn()
+    r = c.execute("SELECT * FROM captcha_pending WHERE user_id=? ORDER BY deadline LIMIT 1",
+                  (user_id,)).fetchone()
+    c.close(); return r
+
+def captcha_clear(chat_id, user_id):
+    c = _conn()
+    c.execute("DELETE FROM captcha_pending WHERE chat_id=? AND user_id=?", (chat_id, user_id))
+    c.commit(); c.close()
+
+def captcha_expired(now_ts):
+    c = _conn()
+    rows = c.execute("SELECT * FROM captcha_pending WHERE deadline < ?", (now_ts,)).fetchall()
+    c.close(); return rows
+
+def member_verify(chat_id, user_id):
+    c = _conn()
+    c.execute("""INSERT INTO members_verified(chat_id, user_id, ts) VALUES(?, ?, ?)
+                 ON CONFLICT(chat_id, user_id) DO NOTHING""",
+              (chat_id, user_id, int(_time.time())))
+    c.commit(); c.close()
+
+def member_is_verified(chat_id, user_id):
+    c = _conn()
+    r = c.execute("SELECT user_id FROM members_verified WHERE chat_id=? AND user_id=?",
+                  (chat_id, user_id)).fetchone()
+    c.close(); return r is not None
+
+def first_msg_mark(chat_id, user_id):
+    """True when this is the user's first tracked message in the chat."""
+    c = _conn()
+    cur = c.execute("INSERT OR IGNORE INTO first_msg_seen(chat_id, user_id) VALUES(?, ?)",
+                    (chat_id, user_id))
+    c.commit(); n = cur.rowcount; c.close(); return n > 0
