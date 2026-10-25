@@ -584,6 +584,45 @@ TELEGRAM_GAMES = (
 )
 GAME_URL_BY_SHORT_NAME = {short: url for short, _, url in TELEGRAM_GAMES}
 
+# Public leaderboard APIs for the three games (same Vercel project as the
+# game pages). The group /games post carries each game's Top 5 under the
+# cards; the full Top 20 board lives inside each game.
+GAME_BOARD_APIS = (
+    ("neonrush", "🏎 *NEON RUSH*", "https://frg-fight-club.vercel.app/api/neon-rush-board"),
+    ("solitaire", "🃏 *SOLITAIRE*", "https://frg-fight-club.vercel.app/api/solitaire-board"),
+    ("hoops", "🏀 *HOOPS*", "https://frg-fight-club.vercel.app/api/hoops-board"),
+)
+
+async def _fetch_board(url):
+    try:
+        async with httpx.AsyncClient(timeout=6) as client:
+            r = await client.get(url)
+            if r.status_code == 200:
+                return r.json()
+    except Exception as e:
+        print(f"board fetch failed {url}: {e}")
+    return None
+
+def _md_escape(text):
+    return re.sub(r"([_*`\[])", r"\\\1", str(text))
+
+async def game_top5_text():
+    lines = ["🏆 *Leaderboards — Top 5*"]
+    for _short, title, api in GAME_BOARD_APIS:
+        lines.append("")
+        lines.append(title)
+        board = await _fetch_board(api)
+        if board is None:
+            lines.append("Leaderboard unavailable right now.")
+            continue
+        rows = (board.get("all") or [])[:5]
+        if not rows:
+            lines.append("No scores yet — be the first 🏆")
+        else:
+            for i, row in enumerate(rows, 1):
+                lines.append(f"{i}. {_md_escape(row.get('name', 'Player'))} — {int(row.get('score', 0)):,}")
+    return "\n".join(lines)
+
 async def on_games(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat is not None and chat.type == "private":
@@ -610,6 +649,12 @@ async def on_games(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "🎮 *Luna Classic games*\n\nThese games are not switched on as native Telegram games yet, so here are the direct links for now.",
             parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(rows))
+    # The Top 5 of each game rides along in the group post; the full board
+    # is inside each game. A board outage must never break /games itself.
+    try:
+        await update.message.reply_text(await game_top5_text(), parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        print(f"games top5 post failed: {e}")
 
 async def on_game_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Telegram asks for the real game URL after a player taps Play."""

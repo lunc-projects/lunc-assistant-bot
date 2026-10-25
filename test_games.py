@@ -120,6 +120,17 @@ class FakeMessage:
         self.replies.append((text, kwargs))
 
 
+async def fake_fetch_board(url):
+    if "neon-rush" in url:
+        return {"all": [{"name": "Tom", "score": 1192}, {"name": "Ace", "score": 900}], "week": []}
+    if "solitaire" in url:
+        return {"all": [], "week": []}
+    return None
+
+
+bot._fetch_board = fake_fetch_board
+
+
 async def group_case():
     message = FakeMessage()
     update = types.SimpleNamespace(
@@ -130,11 +141,16 @@ async def group_case():
     await bot.on_games(update, types.SimpleNamespace(bot=fake_bot))
     check("group tries every native game card",
           fake_bot.sent_games == [(-100123, "neonrush"), (-100123, "solitaire"), (-100123, "hoops")])
-    check("only the failed game falls back to a link", len(message.replies) == 1)
+    check("fallback reply plus Top 5 post", len(message.replies) == 2)
     if message.replies:
         rows = message.replies[0][1]["reply_markup"].inline_keyboard
         flat = [b for row in rows for b in row]
         check("fallback has just the Hoops link", len(flat) == 1 and flat[0].url == bot.HOOPS_URL)
+    if len(message.replies) == 2:
+        board_text = message.replies[1][0]
+        check("Top 5 shows the Neon leader", "1. Tom — 1,192" in board_text)
+        check("Top 5 marks the empty Solitaire board", board_text.count("No scores yet") == 1)
+        check("Top 5 admits an unavailable board", "Leaderboard unavailable right now." in board_text)
 
 
 asyncio.run(group_case())
