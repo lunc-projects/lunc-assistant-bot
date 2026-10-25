@@ -85,6 +85,9 @@ Protection means: new joiners pass a short safety check in my DM before they can
 Type a hashtag in chat — #memo, #scammed, #ibctransfer, #safety… — and I'll answer it. #commands lists them all.
 /setrules <text> — group admins set this group's rules (/rules or #rules shows them)
 /setwelcome <text> — group admins set the note new joiners see (/welcome shows it)
+/report — reply to a scam/spam message: alerts this group's admins by DM with a link to it
+/faq — this group's saved questions · /faq <question> shows an answer · just typing the question in chat works too
+/addfaq <question> | <answer> — group admins save an FAQ (/delfaq <question> removes one)
 
 *Notifications (your choice, on/off)*
 /burnalerts — burn notifications menu (master on/off + types)
@@ -1090,6 +1093,110 @@ async def on_welcome(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = store.get_setting(chat.id, "welcome_text")
     await update.message.reply_text(text if text else "No welcome note set for this group yet — an admin can set one with /setwelcome <text>.")
 
+# --- /report + per-group /faq (2026-10-25) ---
+
+REPORT_CD = {}  # (chat_id, user_id) -> ts; one report per user per chat per 5 min
+
+async def on_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    msg = update.message
+    if chat.type not in ("group", "supergroup"):
+        await msg.reply_text("Use /report in a group, as a reply to the message you're reporting."); return
+    if not msg.reply_to_message:
+        await msg.reply_text("Reply to the message you want to report, with /report."); return
+    uid = update.effective_user.id
+    now = int(time.time())
+    if now - REPORT_CD.get((chat.id, uid), 0) < 300:
+        await msg.reply_text("You've already reported something here in the last few minutes — the admins have it."); return
+    REPORT_CD[(chat.id, uid)] = now
+    target = msg.reply_to_message
+    author = target.from_user
+    author_name = author.full_name if author else "unknown"
+    author_id = author.id if author else 0
+    excerpt = (target.text or target.caption or "(no text — media, sticker, or file)")[:200]
+    if chat.username:
+        link = f"https://t.me/{chat.username}/{target.message_id}"
+    elif str(chat.id).startswith("-100"):
+        link = f"https://t.me/c/{str(chat.id)[4:]}/{target.message_id}"
+    else:
+        link = ""
+    note = " ".join(ctx.args or [])
+    report = (f"🚩 Report in {chat.title or 'a group'}\n"
+              f"Reported by: {update.effective_user.full_name} ({uid})\n"
+              f"Message by: {author_name} ({author_id})\n"
+              f"Text: {excerpt}\n"
+              + (f"Note: {note}\n" if note else "")
+              + (f"Jump to it: {link}" if link else ""))
+    sent, notified = 0, set()
+    try:
+        admins = await ctx.bot.get_chat_administrators(chat.id)
+    except Exception:
+        admins = []
+    for a in admins:
+        u = a.user
+        if u.is_bot or u.id == uid: continue
+        try:
+            await ctx.bot.send_message(u.id, report)
+            sent += 1; notified.add(u.id)
+        except Exception:
+            pass  # an admin who never opened a DM with the bot can't be DM'd
+    if OWNER_ID and OWNER_ID != uid and OWNER_ID not in notified:
+        try:
+            await ctx.bot.send_message(OWNER_ID, report)
+            sent += 1
+        except Exception:
+            pass
+    if sent:
+        await msg.reply_text(f"🚩 Reported — {sent} admin(s) notified by DM.")
+    else:
+        await msg.reply_text("🚩 Noted — but no admin could be reached by DM (an admin has to open a chat with me once before I can DM them). Please tag an admin here too.")
+
+async def on_faq(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if chat.type not in ("group", "supergroup"):
+        await update.message.reply_text("FAQs live in groups."); return
+    q = " ".join(ctx.args or []).strip().lower()
+    if q:
+        a = store.faq_get(chat.id, q)
+        await update.message.reply_text(a if a else "No saved answer for that — /faq lists this group's saved questions.")
+        return
+    qs = store.faq_list(chat.id)
+    if not qs:
+        await update.message.reply_text("No FAQs saved for this group yet. An admin can add one: /addfaq <question> | <answer>")
+    else:
+        await update.message.reply_text("❓ This group's FAQs:\n" + "\n".join(f"• {x}" for x in qs) + "\n\nAsk one with /faq <question> — or just type the question in chat.")
+
+async def on_addfaq(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if chat.type not in ("group", "supergroup"):
+        await update.message.reply_text("Add FAQs inside the group."); return
+    if not await _can_change(update, ctx):
+        await update.message.reply_text("Only group admins can add FAQs."); return
+    parts = (update.message.text or "").split(None, 1)
+    raw = parts[1] if len(parts) > 1 else ""
+    if "|" not in raw:
+        await update.message.reply_text("Usage: /addfaq <question> | <answer>\nExample: /addfaq where do I stake | Use /stake for the steps, or the guide on luncscan.com"); return
+    q, a = raw.split("|", 1)
+    q, a = q.strip().lower(), a.strip()
+    if not q or not a:
+        await update.message.reply_text("Both a question and an answer are needed: /addfaq <question> | <answer>"); return
+    store.faq_add(chat.id, q[:120], a[:1000], update.effective_user.id)
+    await update.message.reply_text(f"✅ FAQ saved: '{q[:120]}' — /faq {q[:120]} shows it, and typing the question in chat works too.")
+
+async def on_delfaq(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if chat.type not in ("group", "supergroup"):
+        await update.message.reply_text("FAQs live in groups."); return
+    if not await _can_change(update, ctx):
+        await update.message.reply_text("Only group admins can remove FAQs."); return
+    q = " ".join(ctx.args or []).strip().lower()
+    if not q:
+        await update.message.reply_text("Usage: /delfaq <question>"); return
+    if store.faq_remove(chat.id, q):
+        await update.message.reply_text("FAQ removed.")
+    else:
+        await update.message.reply_text("No FAQ with that exact question — /faq lists them.")
+
 async def on_learn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
         await update.message.reply_text("Usage: /learn <word> — try: " + ", ".join(GLOSSARY.keys())); return
@@ -1325,6 +1432,13 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if _ans:
                 await update.message.reply_text(_ans)
                 return
+        # FAQ exact match: a message that IS a saved question gets its answer
+        if 0 < len(text) <= 120:
+            _fa = store.faq_get(chat.id, text.strip().lower())
+            if _fa and int(time.time()) - TAG_COOLDOWN.get((chat.id, "faq"), 0) >= 60:
+                TAG_COOLDOWN[(chat.id, "faq")] = int(time.time())
+                await update.message.reply_text(_fa)
+                return
     # Mention = ask
     bot_name = (await ctx.bot.get_me()).username
     if bot_name and f"@{bot_name}" in text:
@@ -1434,6 +1548,10 @@ def main():
     app.add_handler(CommandHandler("rules", on_rules))
     app.add_handler(CommandHandler("setwelcome", on_setwelcome))
     app.add_handler(CommandHandler("welcome", on_welcome))
+    app.add_handler(CommandHandler("report", on_report))
+    app.add_handler(CommandHandler("faq", on_faq))
+    app.add_handler(CommandHandler("addfaq", on_addfaq))
+    app.add_handler(CommandHandler("delfaq", on_delfaq))
     app.add_handler(CallbackQueryHandler(on_captcha_callback, pattern=r"^cap:"))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_new_members))
     app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_left_member))

@@ -270,6 +270,9 @@ def _ensure_mod_tables(c):
         PRIMARY KEY(chat_id, user_id))""")
     c.execute("""CREATE TABLE IF NOT EXISTS blacklist(
         word TEXT PRIMARY KEY, added_by INTEGER, ts INTEGER)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS faq(
+        chat_id INTEGER, question TEXT, answer TEXT, added_by INTEGER, ts INTEGER,
+        PRIMARY KEY(chat_id, question))""")
 
 import time as _time
 
@@ -449,3 +452,30 @@ def mod_stats():
         "pending": n("SELECT COUNT(*) FROM captcha_pending"),
     }
     c.close(); return stats
+
+# --- Per-group FAQ (2026-10-25) ---
+
+def faq_add(chat_id, question, answer, added_by):
+    c = _conn()
+    c.execute("""INSERT INTO faq(chat_id, question, answer, added_by, ts) VALUES(?, ?, ?, ?, ?)
+                 ON CONFLICT(chat_id, question) DO UPDATE SET answer=excluded.answer,
+                 added_by=excluded.added_by, ts=excluded.ts""",
+              (chat_id, question, answer, added_by, int(_time.time())))
+    c.commit(); c.close()
+
+def faq_remove(chat_id, question):
+    c = _conn()
+    cur = c.execute("DELETE FROM faq WHERE chat_id=? AND question=?", (chat_id, question))
+    c.commit(); n = cur.rowcount; c.close(); return n
+
+def faq_get(chat_id, question):
+    c = _conn()
+    r = c.execute("SELECT answer FROM faq WHERE chat_id=? AND question=?",
+                  (chat_id, question)).fetchone()
+    c.close(); return r["answer"] if r else None
+
+def faq_list(chat_id):
+    c = _conn()
+    rows = c.execute("SELECT question FROM faq WHERE chat_id=? ORDER BY question",
+                     (chat_id,)).fetchall()
+    c.close(); return [r["question"] for r in rows]
