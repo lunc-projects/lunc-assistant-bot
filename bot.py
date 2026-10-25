@@ -55,6 +55,7 @@ Or just @mention me in the group, or DM me
 *Info*
 /links — official links only
 /safety — scam / seed phrase safety rules
+/privacy — what this bot logs, what the AI sees, what it can never do
 /learn <word> — plain-English glossary (e.g. /learn quorum)
 
 *Ranks (AI access)*
@@ -64,6 +65,9 @@ Rank is earned by chatting on distinct days (not message count). Owner: /rankset
 
 *Daily AI pot*
 200,000 tokens a day (the free-plan allowance). When the pot runs out, AI pauses with a "daily limit reached" note until midnight UTC — simple commands and basic summaries keep working.
+
+*AI in this group*
+Group admins can turn AI off or on for this group only: /aioff, /aion. Default is on.
 
 *Notifications (your choice, on/off)*
 /burnalerts — burn notifications menu (master on/off + types)
@@ -222,12 +226,21 @@ RANK0_NOTE = ("🔰 You're rank 0, so AI queries are locked for now. "
               "Chat in a group on a few different days to reach rank 1 — "
               "no AI call was spent on this message.")
 
+GROUP_AI_OFF_NOTE = (
+    "🔒 AI is turned off in this group by its admins. Simple commands still work: "
+    "/price, /validators, /proposals, /links, /calc, /stake, /safety. "
+    "An admin can turn AI back on with /aion.")
+
 async def ai_guard(update):
-    """AI gate: kill switch, then rank, then daily cap. False = message already sent."""
+    """AI gate: kill switch, then the group's own AI switch, then rank,
+    then daily cap. False = message already sent."""
     if not AI_ENABLED:
         await update.message.reply_text(
             "🤖 AI features are temporarily disabled while we review security. "
             "Simple commands still work: /price, /validators, /proposals, /links, /calc, /stake, /safety. /summary and /catchup also work as basic non-AI summaries while AI is off.")
+        return False
+    if update.effective_chat.type != "private" and not store.ai_enabled(update.effective_chat.id):
+        await update.message.reply_text(GROUP_AI_OFF_NOTE)
         return False
     user_id = update.effective_user.id
     chat = update.effective_chat
@@ -498,6 +511,35 @@ async def on_links(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def on_safety(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(SAFETY_TEXT, parse_mode=ParseMode.MARKDOWN)
 
+PRIVACY_TEXT = (
+    "🔒 *Privacy & security — what this bot does*\n\n"
+    "• *It cannot move funds.* The bot has no wallet, no private keys, and no signing or sending code anywhere. Every command is a read-only lookup or a settings toggle.\n\n"
+    "• *What it logs:* in groups, message text is kept for 7 days so /summary and /catchup can work, then deleted automatically (a server restart wipes it sooner). Your rank counts the days you chat — commands don't count.\n\n"
+    "• *What the AI sees:* only when someone uses an AI feature (/ask, /summary, mentions, DM summaries). Then the AI service (Groq) receives the message text and usernames needed for that one answer. Simple commands (/price, /validators, …) send nothing anywhere.\n\n"
+    "• *Your group's controls:* group admins run this group — including AI on/off (/aioff, /aion), alert settings, and notification choices. Usage stats are owner-only.\n\n"
+    "• *The limits:* ranks, daily AI caps, and a hard daily token budget (200,000/day) mean the AI quota can't be drained by spam — the worst case is AI pausing until midnight UTC.\n\n"
+    "• *Don't take our word for it:* the bot's code is public — read exactly what it does: github.com/lunc-projects/lunc-assistant-bot")
+
+async def on_privacy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(PRIVACY_TEXT, parse_mode=ParseMode.MARKDOWN)
+
+async def _ai_toggle(update: Update, ctx: ContextTypes.DEFAULT_TYPE, on: bool):
+    chat = update.effective_chat
+    if chat.type == "private":
+        await update.message.reply_text("This switch is for groups — in DM, your AI access follows your rank and the daily limits."); return
+    if not await _can_change(update, ctx):
+        await update.message.reply_text("Only group admins can change this group's AI setting."); return
+    store.set_ai_enabled(chat.id, on)
+    await update.message.reply_text(
+        "🤖 AI is ON for this group (rank gates and daily limits still apply)." if on
+        else "🔒 AI is OFF for this group — no AI calls will be made here. Simple commands still work. An admin can turn it back on with /aion.")
+
+async def on_aion(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await _ai_toggle(update, ctx, True)
+
+async def on_aioff(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await _ai_toggle(update, ctx, False)
+
 async def on_learn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
         await update.message.reply_text("Usage: /learn <word> — try: " + ", ".join(GLOSSARY.keys())); return
@@ -734,7 +776,7 @@ async def post_init(app: Application):
         await app.bot.set_my_short_description("Summarizes hundreds of group messages into a quick summary + AI assistant.")
         await app.bot.set_my_commands([
             ("summary","Summarize group messages"),("catchup","What you missed"),("tldr","Shrink a message (reply to it)"),
-            ("ask","Ask me anything"),("proposals","Proposals voting now"),("proposal","Proposal + tally"),("price","LUNC + USTC price"),("stats","Chain stats"),("burn","Live burn tax info"),("burnalerts","Burn notifications on/off"),("govalerts","Proposal alerts on/off"),("wallet","Public wallet lookup"),("token","CW20 token info"),("validators","Top validators"),("watchvalidator","Watch a validator"),("rank","Your rank in this chat"),("language","Choose your language"),("help","All commands")])
+            ("ask","Ask me anything"),("proposals","Proposals voting now"),("proposal","Proposal + tally"),("price","LUNC + USTC price"),("stats","Chain stats"),("burn","Live burn tax info"),("burnalerts","Burn notifications on/off"),("govalerts","Proposal alerts on/off"),("wallet","Public wallet lookup"),("token","CW20 token info"),("validators","Top validators"),("watchvalidator","Watch a validator"),("rank","Your rank in this chat"),("language","Choose your language"),("privacy","Privacy & security info"),("help","All commands")])
         # Profile photo (owner's logo) — re-applied on boot so redeploys never lose it
         try:
             from telegram import InputProfilePhotoStatic
@@ -787,6 +829,9 @@ def main():
     app.add_handler(CommandHandler("watchlist", on_watchlist))
     app.add_handler(CommandHandler("burnalerts", on_burnalerts))
     app.add_handler(CommandHandler("settings", on_settings))
+    app.add_handler(CommandHandler("privacy", on_privacy))
+    app.add_handler(CommandHandler("aion", on_aion))
+    app.add_handler(CommandHandler("aioff", on_aioff))
     app.add_handler(CallbackQueryHandler(on_burn_callback, pattern=r"^burn:"))
     app.add_handler(CallbackQueryHandler(on_gov_callback, pattern=r"^gov:"))
     app.add_handler(CallbackQueryHandler(on_lang_callback, pattern=r"^lang:"))

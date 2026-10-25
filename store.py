@@ -47,6 +47,19 @@ def set_setting(chat_id, key, value):
     c.execute("INSERT INTO chat_settings(chat_id,key,value) VALUES(?,?,?) ON CONFLICT(chat_id,key) DO UPDATE SET value=excluded.value", (chat_id, key, str(value)))
     c.commit(); c.close()
 
+# --- Per-group AI switch (default ON) ---
+# A group's own admins can turn AI off for their group (/aioff): the
+# ai_guard then blocks every AI path in that chat before rank, caps,
+# or the pot are even consulted. Stored as a normal chat setting;
+# never set = AI on. Private chats are not affected by this switch.
+def ai_enabled(chat_id):
+    return get_setting(chat_id, "ai_group", "on") != "off"
+
+
+def set_ai_enabled(chat_id, on):
+    set_setting(chat_id, "ai_group", "on" if on else "off")
+
+
 BURN_KEYS = ["burn_alerts", "burn_daily", "burn_big", "burn_rate"]
 def burn_settings(chat_id):
     return {k: get_setting(chat_id, k) for k in BURN_KEYS}
