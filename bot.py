@@ -6,9 +6,9 @@ Run: TELEGRAM_BOT_TOKEN=... AI_API_KEY=... python bot.py
 """
 import os, re, time, json, datetime, pathlib
 import httpx
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions, WebAppInfo
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions, WebAppInfo, InlineQueryResultGame
 from telegram.constants import ParseMode
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, InlineQueryHandler, filters, ContextTypes
 import store, ai_client, burn as burn_mod, chain, lang as lang_mod, ratelimit, budget, modquiz, topics, seclogic, alerts as alerts_mod
 from kb import kb_as_text, find_kb_answer
 
@@ -570,10 +570,19 @@ GAMES_TEXT = (
     "🏎 *NEON RUSH* — neon highway racer. Dodge the traffic, chain near misses, and grab LUNC + USTC coins — they're your fuel, run dry and the run ends. Global leaderboard inside the game.\n\n"
     "🃏 *SOLITAIRE* — classic Klondike. Drag cards or tap to auto-move, double-tap sends a card home. Stars light up as you get cards home.\n\n"
     "🏀 *HOOPS* — flick Luna Classic tokens into the hoop. The little flame-haired guy does the shooting: drag back to aim, let go to throw. Baskets build a score multiplier; you've got 3 tokens and 3 minutes.\n\n"
-    "Tap a game to play — in a DM the button opens the game right here in Telegram; in a group it opens the game page.")
+    "Tap a game to play — it opens right here in Telegram.")
 NEON_RUSH_URL = "https://frg-fight-club.vercel.app/neon-rush/"
 SOLITAIRE_URL = "https://frg-fight-club.vercel.app/solitaire/"
 HOOPS_URL = "https://frg-fight-club.vercel.app/hoops/"
+
+# Native Telegram Games (registered in BotFather for this bot). The short
+# names are the identifiers Telegram sends back when a player taps Play.
+TELEGRAM_GAMES = (
+    ("neonrush", "🏎 Play NEON RUSH", NEON_RUSH_URL),
+    ("solitaire", "🃏 Play SOLITAIRE", SOLITAIRE_URL),
+    ("hoops", "🏀 Play HOOPS", HOOPS_URL),
+)
+GAME_URL_BY_SHORT_NAME = {short: url for short, _, url in TELEGRAM_GAMES}
 
 async def on_games(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
@@ -581,12 +590,50 @@ async def on_games(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         rows = [[InlineKeyboardButton("🏎 Play NEON RUSH", web_app=WebAppInfo(url=NEON_RUSH_URL))],
                 [InlineKeyboardButton("🃏 Play SOLITAIRE", web_app=WebAppInfo(url=SOLITAIRE_URL))],
                 [InlineKeyboardButton("🏀 Play HOOPS", web_app=WebAppInfo(url=HOOPS_URL))]]
+        await update.message.reply_text(GAMES_TEXT, parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(rows))
+        return
+
+    # Groups cannot use Web App buttons. Native Telegram Game messages can:
+    # each one carries its own Play button and opens inside Telegram. If a
+    # short name has not been registered in BotFather yet, Telegram rejects
+    # that one game; fall back to a normal link for just that game.
+    failed = []
+    for short_name, label, url in TELEGRAM_GAMES:
+        try:
+            await ctx.bot.send_game(chat_id=chat.id, game_short_name=short_name)
+        except Exception as e:
+            print(f"send_game {short_name} failed: {e}")
+            failed.append((label, url))
+    if failed:
+        rows = [[InlineKeyboardButton(label, url=url)] for label, url in failed]
+        await update.message.reply_text(
+            "🎮 *Luna Classic games*\n\nThese games are not switched on as native Telegram games yet, so here are the direct links for now.",
+            parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(rows))
+
+async def on_game_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Telegram asks for the real game URL after a player taps Play."""
+    q = update.callback_query
+    if q is None or not q.game_short_name:
+        return
+    url = GAME_URL_BY_SHORT_NAME.get(q.game_short_name)
+    if url:
+        await q.answer(url=url)
     else:
-        rows = [[InlineKeyboardButton("🏎 Play NEON RUSH", url=NEON_RUSH_URL)],
-                [InlineKeyboardButton("🃏 Play SOLITAIRE", url=SOLITAIRE_URL)],
-                [InlineKeyboardButton("🏀 Play HOOPS", url=HOOPS_URL)]]
-    await update.message.reply_text(GAMES_TEXT, parse_mode=ParseMode.MARKDOWN,
-        reply_markup=InlineKeyboardMarkup(rows))
+        await q.answer(text="That game isn't available.", show_alert=True)
+
+async def on_inline_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Let people share a native game card by typing @Luncassistantbot."""
+    iq = update.inline_query
+    if iq is None:
+        return
+    needle = (iq.query or "").strip().lower()
+    results = []
+    for short_name, label, _ in TELEGRAM_GAMES:
+        haystack = f"{short_name} {label.lower()}"
+        if not needle or needle in haystack:
+            results.append(InlineQueryResultGame(id=short_name, game_short_name=short_name))
+    await iq.answer(results, cache_time=30, is_personal=False)
 
 async def on_safety(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(SAFETY_TEXT, parse_mode=ParseMode.MARKDOWN)
@@ -2207,6 +2254,8 @@ def main():
     app.add_handler(CallbackQueryHandler(on_burn_callback, pattern=r"^burn:"))
     app.add_handler(CallbackQueryHandler(on_gov_callback, pattern=r"^gov:"))
     app.add_handler(CallbackQueryHandler(on_lang_callback, pattern=r"^lang:"))
+    app.add_handler(CallbackQueryHandler(on_game_callback))
+    app.add_handler(InlineQueryHandler(on_inline_query))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
     app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE & filters.TEXT & ~filters.COMMAND, on_edited_message))
     app.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO | filters.ANIMATION | filters.Document.ALL | filters.AUDIO | filters.VOICE) & ~filters.COMMAND, on_media_message))
