@@ -72,22 +72,34 @@ for it in items:
     if not (0 <= it["answer"] < len(it["options"])): ok = False
     if len(it["options"]) < 3: ok = False
 check("every item has a valid answer index and 3+ options", ok)
-bank_correct = {q["options"][q["correct"]] for q in modquiz.QUESTIONS}
-facts = [it["options"][it["answer"]] for it in items[:3]]
-check("every drawn answer is a bank safety fact", all(f in bank_correct for f in facts))
-check("no duplicate questions in one quiz", len({it["prompt"] for it in items[:3]}) == 3)
-emoji_item = items[3]
-target = emoji_item["options"][emoji_item["answer"]]
-check("emoji answer matches the prompt target",
-      target in modquiz.EMOJI_TARGETS and target in emoji_item["prompt"])
-seen = set()
-for s in range(200):
-    for it in modquiz.build_quiz(random.Random(1000 + s))[:3]:
-        seen.add(it["prompt"])
-check("draws rotate through the whole bank", seen == {q["q"] for q in modquiz.QUESTIONS})
-sets = {tuple(sorted(it["prompt"] for it in modquiz.build_quiz(random.Random(2000 + s))[:3])) for s in range(40)}
-check("different attempts get different question sets", len(sets) > 10)
-check("emoji item has 4 options", len(emoji_item["options"]) == 4)
+import re as _re
+def _validate(items):
+    for it in items:
+        right = it["options"][it["answer"]]
+        p = it["prompt"]
+        if p.startswith("Quick math:"):
+            m = _re.search(r"(\d+) \+ (\d+)", p)
+            if not m or int(right) != int(m.group(1)) + int(m.group(2)): return False
+        elif p == "Which one is an animal?":
+            if right not in modquiz.ANIMALS: return False
+        elif p == "Which one can you eat?":
+            if right not in modquiz.FOODS: return False
+        elif p == "Tap the biggest number":
+            if int(right) != max(int(o) for o in it["options"]): return False
+        elif p.startswith("Tap the "):
+            if right != p[len("Tap the "):]: return False
+        else:
+            return False
+    return True
+all_ok, knowledge_free, varied = True, True, set()
+for s in range(120):
+    quiz = modquiz.build_quiz(random.Random(3000 + s))
+    if not _validate(quiz): all_ok = False
+    if any("seed" in it["prompt"] or "LUNC" in it["prompt"] for it in quiz): knowledge_free = False
+    varied.add(tuple(it["prompt"] for it in quiz))
+check("every generated check's marked answer is truly correct", all_ok)
+check("no knowledge questions (nothing a person has to know)", knowledge_free)
+check("checks vary from attempt to attempt", len(varied) > 30)
 shuffled = modquiz.build_quiz(random.Random(99))
 check("rebuild reshuffles (very likely different order somewhere)",
       [i["options"] for i in shuffled] != [i["options"] for i in modquiz.build_quiz(random.Random(99))] or True)

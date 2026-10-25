@@ -1080,7 +1080,7 @@ async def _start_quiz(update, ctx, pend):
     QUIZ[update.effective_user.id] = sess
     g = store.mod_group(pend["chat_id"])
     title = g["title"] if g else "the group"
-    await update.message.reply_text(f"🛡 Safety check for *{title}* — {len(sess['items'])} quick questions. Get them all right to unlock chatting.", parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(f"🛡 Quick check for *{title}* — {len(sess['items'])} simple taps to prove you're a real person. Get them all right to unlock chatting.", parse_mode=ParseMode.MARKDOWN)
     await _quiz_send(update.message.reply_text, sess)
 
 async def _quiz_send(reply_fn, sess):
