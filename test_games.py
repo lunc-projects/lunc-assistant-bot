@@ -105,11 +105,15 @@ check("short names map to the live pages",
 class FakeBot:
     def __init__(self):
         self.sent_games = []
+        self.sent_messages = []
 
     async def send_game(self, chat_id, game_short_name):
         self.sent_games.append((chat_id, game_short_name))
         if game_short_name == "hoops":
             raise RuntimeError("game not registered yet")
+
+    async def send_message(self, chat_id, text, **kwargs):
+        self.sent_messages.append((chat_id, text, kwargs))
 
 
 class FakeMessage:
@@ -139,18 +143,46 @@ async def group_case():
     )
     fake_bot = FakeBot()
     await bot.on_games(update, types.SimpleNamespace(bot=fake_bot))
-    check("group tries every native game card",
-          fake_bot.sent_games == [(-100123, "neonrush"), (-100123, "solitaire"), (-100123, "hoops")])
-    check("fallback reply plus Top 5 post", len(message.replies) == 2)
+    check("group /games posts NO game cards directly", fake_bot.sent_games == [])
+    check("group /games is a single picker post", len(message.replies) == 1)
     if message.replies:
-        rows = message.replies[0][1]["reply_markup"].inline_keyboard
+        text, kwargs = message.replies[0]
+        rows = kwargs["reply_markup"].inline_keyboard
         flat = [b for row in rows for b in row]
-        check("fallback has just the Hoops link", len(flat) == 1 and flat[0].url == bot.HOOPS_URL)
-    if len(message.replies) == 2:
-        board_text = message.replies[1][0]
-        check("Top 5 shows the Neon leader", "1. Tom — 1,192" in board_text)
-        check("Top 5 marks the empty Solitaire board", board_text.count("No scores yet") == 1)
-        check("Top 5 admits an unavailable board", "Leaderboard unavailable right now." in board_text)
+        check("picker has one button per game",
+              [b.callback_data for b in flat] == ["pick:neonrush", "pick:solitaire", "pick:hoops"])
+        check("picker text shows the Neon leader", "1. Tom — 1,192" in text)
+        check("picker text marks the empty Solitaire board", text.count("No scores yet") == 1)
+        check("picker text admits an unavailable board", "Leaderboard unavailable right now." in text)
+
+
+class FakePick:
+    def __init__(self, data):
+        self.data = data
+        self.game_short_name = None
+        self.message = types.SimpleNamespace(chat=types.SimpleNamespace(id=-100123))
+        self.answer_args = None
+
+    async def answer(self, **kwargs):
+        self.answer_args = kwargs
+
+
+async def pick_case():
+    fake_bot = FakeBot()
+    q = FakePick("pick:solitaire")
+    await bot.on_pick_callback(types.SimpleNamespace(callback_query=q),
+                                 types.SimpleNamespace(bot=fake_bot))
+    check("pick posts only the chosen game card", fake_bot.sent_games == [(-100123, "solitaire")])
+    check("successful pick sends no link message", fake_bot.sent_messages == [])
+    q2 = FakePick("pick:hoops")
+    await bot.on_pick_callback(types.SimpleNamespace(callback_query=q2),
+                                 types.SimpleNamespace(bot=fake_bot))
+    check("failed pick falls back to that game's link",
+          len(fake_bot.sent_messages) == 1
+          and fake_bot.sent_messages[0][2]["reply_markup"].inline_keyboard[0][0].url == bot.HOOPS_URL)
+
+
+asyncio.run(pick_case())
 
 
 asyncio.run(group_case())

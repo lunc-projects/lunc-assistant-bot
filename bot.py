@@ -633,28 +633,36 @@ async def on_games(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(rows))
         return
 
-    # Groups cannot use Web App buttons. Native Telegram Game messages can:
-    # each one carries its own Play button and opens inside Telegram. If a
-    # short name has not been registered in BotFather yet, Telegram rejects
-    # that one game; fall back to a normal link for just that game.
-    failed = []
-    for short_name, label, url in TELEGRAM_GAMES:
-        try:
-            await ctx.bot.send_game(chat_id=chat.id, game_short_name=short_name)
-        except Exception as e:
-            print(f"send_game {short_name} failed: {e}")
-            failed.append((label, url))
-    if failed:
-        rows = [[InlineKeyboardButton(label, url=url)] for label, url in failed]
-        await update.message.reply_text(
-            "🎮 *Luna Classic games*\n\nThese games are not switched on as native Telegram games yet, so here are the direct links for now.",
-            parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(rows))
-    # The Top 5 of each game rides along in the group post; the full board
-    # is inside each game. A board outage must never break /games itself.
+    # Groups: ONE picker post, never a flood of game cards. The message
+    # carries every game's Top 5 and one button per game; a member taps
+    # the game they want and only that game's card posts (on_pick_callback).
+    rows = [[InlineKeyboardButton(label, callback_data=f"pick:{short_name}")]
+            for short_name, label, _url in TELEGRAM_GAMES]
+    text = "🎮 *Luna Classic games*\n\n" + await game_top5_text() + "\n\n👇 *Pick a game* — tap one and only that game posts."
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup(rows))
+
+async def on_pick_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """A member picked one game in a group: post only that game's card."""
+    q = update.callback_query
+    if q is None or not q.data:
+        return
+    short_name = q.data.split(":", 1)[1] if ":" in q.data else ""
+    entry = {s: (label, url) for s, label, url in TELEGRAM_GAMES}.get(short_name)
+    if not entry:
+        await q.answer(text="That game isn't available.", show_alert=True)
+        return
+    label, url = entry
+    chat_id = q.message.chat.id if q.message is not None and q.message.chat is not None else None
     try:
-        await update.message.reply_text(await game_top5_text(), parse_mode=ParseMode.MARKDOWN)
+        await ctx.bot.send_game(chat_id=chat_id, game_short_name=short_name)
+        await q.answer()
     except Exception as e:
-        print(f"games top5 post failed: {e}")
+        print(f"pick send_game {short_name} failed: {e}")
+        await q.answer(text="Couldn't post that game card — sending its link instead.")
+        rows = [[InlineKeyboardButton(label, url=url)]]
+        await ctx.bot.send_message(chat_id=chat_id, text="🎮 *Luna Classic games*",
+            parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(rows))
 
 async def on_game_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Telegram asks for the real game URL after a player taps Play."""
@@ -2299,6 +2307,7 @@ def main():
     app.add_handler(CallbackQueryHandler(on_burn_callback, pattern=r"^burn:"))
     app.add_handler(CallbackQueryHandler(on_gov_callback, pattern=r"^gov:"))
     app.add_handler(CallbackQueryHandler(on_lang_callback, pattern=r"^lang:"))
+    app.add_handler(CallbackQueryHandler(on_pick_callback, pattern=r"^pick:"))
     app.add_handler(CallbackQueryHandler(on_game_callback))
     app.add_handler(InlineQueryHandler(on_inline_query))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
