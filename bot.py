@@ -87,7 +87,9 @@ Type a hashtag in chat — #memo, #scammed, #ibctransfer, #safety… — and I'l
 /setwelcome <text> — group admins set the note new joiners see (/welcome shows it)
 /report — reply to a scam/spam message: alerts this group's admins by DM with a link to it
 /faq — this group's saved questions · /faq <question> shows an answer · just typing the question in chat works too
-/addfaq <question> | <answer> — group admins save an FAQ (/delfaq <question> removes one)
+/addfaq — group admins save an FAQ (it walks you through it step by step; /delfaq <question> removes one)
+/menu — buttons for the everyday stuff (price, proposals, safety…) — no commands to remember
+/panel — group admins: tap switches for AI, scam reminders, and protection
 
 *Notifications (your choice, on/off)*
 /burnalerts — burn notifications menu (master on/off + types)
@@ -413,13 +415,15 @@ async def on_burn_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ================= TOP PACK: live info =================
-async def on_price2(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def price_text():
     try:
         d = await chain.prices()
-        msg = "💰 *Prices — live (CoinGecko)*\n" + chain.fmt_price(d["terra-luna"], "LUNC") + "\n" + chain.fmt_price(d["terrausd"], "USTC")
-        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+        return "💰 *Prices — live (CoinGecko)*\n" + chain.fmt_price(d["terra-luna"], "LUNC") + "\n" + chain.fmt_price(d["terrausd"], "USTC")
     except Exception:
-        await update.message.reply_text("Couldn't fetch prices right now.")
+        return "Couldn't fetch prices right now."
+
+async def on_price2(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(await price_text(), parse_mode=ParseMode.MARKDOWN)
 
 async def on_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try: await update.message.reply_text(await chain.stats_text(), parse_mode=ParseMode.MARKDOWN)
@@ -436,17 +440,20 @@ async def on_convert(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"{amt:,.0f} LUNC ≈ ${amt*price:,.2f} (at ${price:.8g}, CoinGecko)")
     except Exception: await update.message.reply_text("Couldn't convert right now — check the amount format.")
 
-async def on_proposals(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def proposals_text():
     try:
         props = await chain.proposals_voting()
     except Exception:
-        await update.message.reply_text("Couldn't fetch proposals right now."); return
+        return "Couldn't fetch proposals right now."
     if not props:
-        await update.message.reply_text("No proposals are in the voting period right now."); return
+        return "No proposals are in the voting period right now."
     lines = ["🗳️ *Proposals currently voting:*"]
     for pr in props:
         lines.append(f"\n*{pr['id']}* — {pr.get('title','(no title)')}\nVoting ends: {pr.get('voting_end_time','')} UTC\nUse /proposal {pr['id']} for the tally")
-    await send_long(update, "\n".join(lines))
+    return "\n".join(lines)
+
+async def on_proposals(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await send_long(update, await proposals_text())
 
 async def on_wallet(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args: await update.message.reply_text("Usage: /wallet terra1..."); return
@@ -649,8 +656,11 @@ async def on_protect(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     note = ("\n⚠️ Still needed for the gate to work: " + ", ".join(missing) + ".") if missing else ""
     await update.message.reply_text("🛡 Protection requested — the bot owner has been notified for approval." + note)
     if OWNER_ID:
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Approve", callback_data=f"mod:approve:{chat.id}"),
+            InlineKeyboardButton("❌ Deny", callback_data=f"mod:deny:{chat.id}")]])
         try:
-            await ctx.bot.send_message(OWNER_ID, f"🛡 Protection request: {chat.title} (chat id {chat.id}), requested by user {update.effective_user.id}.\nApprove: /approve {chat.id}\nDeny: /deny {chat.id}")
+            await ctx.bot.send_message(OWNER_ID, f"🛡 Protection request: {chat.title} (chat id {chat.id}), requested by user {update.effective_user.id}.\nTap a button — or use /approve {chat.id} · /deny {chat.id}", reply_markup=kb)
         except Exception:
             pass
 
@@ -668,10 +678,17 @@ async def on_unprotect(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def on_approve(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _owner_only(update): return
     if not ctx.args:
-        await update.message.reply_text("Usage: /approve <chat_id>"); return
-    try: chat_id = int(ctx.args[0])
-    except ValueError:
-        await update.message.reply_text("Chat id must be a number."); return
+        pend = store.pending_groups()
+        if len(pend) == 1:
+            chat_id = pend[0]["chat_id"]
+        elif not pend:
+            await update.message.reply_text("No groups are waiting for approval."); return
+        else:
+            await update.message.reply_text("More than one group is waiting — see them with /groups, then /approve <chat_id>."); return
+    else:
+        try: chat_id = int(ctx.args[0])
+        except ValueError:
+            await update.message.reply_text("Chat id must be a number."); return
     if store.mod_approve_group(chat_id):
         await update.message.reply_text(f"✅ Group {chat_id} approved — protection is ON.")
         try: await ctx.bot.send_message(chat_id, "🛡 Protection is ON for this group: new joiners pass a short safety check before they can post, known scammers are removed automatically, and a first message containing a link gets the sender removed.")
@@ -762,11 +779,15 @@ async def on_gbans(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def on_elevate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _owner_only(update): return
-    if not ctx.args:
-        await update.message.reply_text("Usage: /elevate <user_id>"); return
-    try: target = int(ctx.args[0])
-    except ValueError:
-        await update.message.reply_text("User id must be a number."); return
+    target = None
+    if update.message.reply_to_message and update.message.reply_to_message.from_user:
+        target = update.message.reply_to_message.from_user.id
+    elif ctx.args:
+        try: target = int(ctx.args[0])
+        except ValueError:
+            await update.message.reply_text("User id must be a number."); return
+    if not target:
+        await update.message.reply_text("Usage: reply to the person's message with /elevate, or /elevate <user_id>."); return
     store.elevated_add(target, update.effective_user.id)
     await update.message.reply_text(f"✅ User {target} is now an elevated user (can /gban and /gunban across every protected group).")
 
@@ -1066,7 +1087,8 @@ async def _set_group_text(update, ctx, key, label, show_cmd):
     if update.message.reply_to_message and update.message.reply_to_message.text:
         text = update.message.reply_to_message.text.strip()
     if not text:
-        await update.message.reply_text(f"Usage: /set{label} <text> — or reply to a message with /set{label} to use its text. /set{label} clear removes it."); return
+        PENDING_INPUT[(chat.id, update.effective_user.id)] = {"kind": "rules" if key == "rules_text" else "welcome"}
+        await update.message.reply_text(f"Easy way: just send the {label} text as your next message and I'll save it. (/cancel stops.)\nOr all at once: /set{label} <text>"); return
     if text.lower() == "clear":
         store.set_setting(chat.id, key, "")
         await update.message.reply_text(f"{label.capitalize()} cleared."); return
@@ -1174,6 +1196,9 @@ async def on_addfaq(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Only group admins can add FAQs."); return
     parts = (update.message.text or "").split(None, 1)
     raw = parts[1] if len(parts) > 1 else ""
+    if not raw:
+        PENDING_INPUT[(chat.id, update.effective_user.id)] = {"kind": "faq_q"}
+        await update.message.reply_text("Let's add an FAQ the easy way — first, send the *question* as your next message. (/cancel stops.)", parse_mode=ParseMode.MARKDOWN); return
     if "|" not in raw:
         await update.message.reply_text("Usage: /addfaq <question> | <answer>\nExample: /addfaq where do I stake | Use /stake for the steps, or the guide on luncscan.com"); return
     q, a = raw.split("|", 1)
@@ -1196,6 +1221,152 @@ async def on_delfaq(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("FAQ removed.")
     else:
         await update.message.reply_text("No FAQ with that exact question — /faq lists them.")
+
+# --- Simplify round (2026-10-25): buttons instead of typed commands ---
+
+PENDING_INPUT = {}  # (chat_id, user_id) -> {"kind": faq_q|faq_a|rules|welcome, "q": str}
+
+async def on_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if PENDING_INPUT.pop((update.effective_chat.id, update.effective_user.id), None):
+        await update.message.reply_text("Cancelled.")
+    else:
+        await update.message.reply_text("Nothing to cancel.")
+
+MENU_KB = InlineKeyboardMarkup([
+    [InlineKeyboardButton("💰 Price", callback_data="menu:price"), InlineKeyboardButton("📊 Stats", callback_data="menu:stats")],
+    [InlineKeyboardButton("🗳 Proposals", callback_data="menu:proposals"), InlineKeyboardButton("🛡 Safety", callback_data="menu:safety")],
+    [InlineKeyboardButton("🔗 Links", callback_data="menu:links"), InlineKeyboardButton("🔒 Privacy", callback_data="menu:privacy")],
+    [InlineKeyboardButton("📜 Group rules", callback_data="menu:rules"), InlineKeyboardButton("❓ Group FAQ", callback_data="menu:faq")],
+])
+
+async def on_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("👇 Tap what you need — no commands to remember.\n(📖 Full command list: /help)", reply_markup=MENU_KB)
+
+async def on_menu_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    chat = q.message.chat
+    action = q.data.split(":")[1]
+    await q.answer()
+    md = True
+    if action == "price":
+        text = await price_text()
+    elif action == "stats":
+        try: text = await chain.stats_text()
+        except Exception: text = "Couldn't fetch chain stats right now."
+    elif action == "proposals":
+        text = await proposals_text()
+    elif action == "safety":
+        text = SAFETY_TEXT
+    elif action == "links":
+        text = LINKS_TEXT
+    elif action == "privacy":
+        text = PRIVACY_TEXT
+    elif action == "rules":
+        md = False
+        if chat.type in ("group", "supergroup"):
+            t = store.get_setting(chat.id, "rules_text")
+            text = ("📜 Group rules\n\n" + t) if t else "No rules set for this group yet — an admin can set them with /setrules."
+        else:
+            text = "Group rules live in groups — tap 📜 inside a group."
+    elif action == "faq":
+        md = False
+        if chat.type in ("group", "supergroup"):
+            qs = store.faq_list(chat.id)
+            text = ("❓ This group's FAQs:\n" + "\n".join(f"• {x}" for x in qs) + "\n\nAsk one with /faq <question> — or just type the question in chat.") if qs else "No FAQs saved for this group yet. An admin can add one with /addfaq."
+        else:
+            text = "Group FAQs live in groups — tap ❓ inside a group."
+    else:
+        return
+    await ctx.bot.send_message(chat.id, text, parse_mode=ParseMode.MARKDOWN if md else None)
+
+def _panel_text(chat):
+    return (f"⚙️ Admin panel — {chat.title or 'this group'}\n"
+            f"🛡 Protection: {'ON' if store.mod_is_protected(chat.id) else 'OFF'}\n"
+            f"🤖 AI answers: {'ON' if store.ai_enabled(chat.id) else 'OFF'}\n"
+            f"⚠️ Scam reminders: {'ON' if store.scam_alerts_enabled(chat.id) else 'OFF'}\n\n"
+            "Tap a switch to flip it.")
+
+def _panel_kb(chat):
+    rows = [
+        [InlineKeyboardButton("🤖 AI answers: ON ✅" if store.ai_enabled(chat.id) else "🤖 AI answers: OFF", callback_data="panel:ai")],
+        [InlineKeyboardButton("⚠️ Scam reminders: ON ✅" if store.scam_alerts_enabled(chat.id) else "⚠️ Scam reminders: OFF", callback_data="panel:scam")],
+    ]
+    if store.mod_is_protected(chat.id):
+        rows.append([InlineKeyboardButton("📊 Protection stats", callback_data="panel:stats")])
+    else:
+        rows.append([InlineKeyboardButton("🛡 Request protection", callback_data="panel:protect")])
+    return InlineKeyboardMarkup(rows)
+
+async def on_panel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if chat.type not in ("group", "supergroup"):
+        await update.message.reply_text("The admin panel works inside a group."); return
+    if not (_is_owner(update.effective_user.id) or await _can_change(update, ctx)):
+        await update.message.reply_text("Only group admins can use the panel."); return
+    await update.message.reply_text(_panel_text(chat), reply_markup=_panel_kb(chat))
+
+async def on_panel_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    chat = q.message.chat
+    if not (_is_owner(q.from_user.id) or await _is_group_admin(ctx, chat.id, q.from_user.id)):
+        await q.answer("Only group admins can use the panel.", show_alert=True); return
+    action = q.data.split(":")[1]
+    if action == "ai":
+        store.set_ai_enabled(chat.id, not store.ai_enabled(chat.id))
+        await q.answer("AI answers " + ("ON" if store.ai_enabled(chat.id) else "OFF"))
+    elif action == "scam":
+        if not store.mod_is_protected(chat.id):
+            await q.answer("Protection isn't on for this group yet — scam reminders come with it.", show_alert=True); return
+        store.set_scam_alerts(chat.id, not store.scam_alerts_enabled(chat.id))
+        await q.answer("Scam reminders " + ("ON" if store.scam_alerts_enabled(chat.id) else "OFF"))
+    elif action == "stats":
+        s = store.mod_stats()
+        await q.answer()
+        await ctx.bot.send_message(chat.id, f"🛡 Protection stats — protected groups: {s['groups_protected']}, global bans: {s['gbans']}, elevated users: {s['elevated']}, verified members: {s['verified']}, waiting on the safety check: {s['pending']}")
+        return
+    elif action == "protect":
+        if store.mod_is_protected(chat.id):
+            await q.answer("Already protected 🛡"); return
+        row = store.mod_group(chat.id)
+        if row is not None:
+            await q.answer("Already requested — waiting on the owner's approval.", show_alert=True); return
+        store.mod_request_group(chat.id, chat.title or "", q.from_user.id)
+        if OWNER_ID:
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Approve", callback_data=f"mod:approve:{chat.id}"),
+                InlineKeyboardButton("❌ Deny", callback_data=f"mod:deny:{chat.id}")]])
+            try: await ctx.bot.send_message(OWNER_ID, f"🛡 Protection request: {chat.title} (chat id {chat.id}), requested by user {q.from_user.id}.\nTap a button — or use /approve {chat.id} · /deny {chat.id}", reply_markup=kb)
+            except Exception: pass
+        await q.answer("Request sent to the owner ✅", show_alert=True)
+        return
+    else:
+        return
+    try: await q.edit_message_text(_panel_text(chat), reply_markup=_panel_kb(chat))
+    except Exception: pass
+
+async def on_mod_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not _is_owner(q.from_user.id):
+        await q.answer("Owner only.", show_alert=True); return
+    try:
+        _, action, cid_s = q.data.split(":")
+        chat_id = int(cid_s)
+    except Exception:
+        await q.answer("Bad button."); return
+    if action == "approve":
+        if store.mod_approve_group(chat_id):
+            await q.answer("Approved ✅")
+            try: await q.edit_message_text(f"✅ Approved — protection is ON for chat {chat_id}.")
+            except Exception: pass
+            try: await ctx.bot.send_message(chat_id, "🛡 Protection is ON for this group: new joiners pass a short safety check before they can post, known scammers are removed automatically, and a first message containing a link gets the sender removed.")
+            except Exception: pass
+        else:
+            await q.answer("That request is already gone.", show_alert=True)
+    else:
+        store.mod_remove_group(chat_id)
+        await q.answer("Denied ❌")
+        try: await q.edit_message_text(f"❌ Denied — the protection request from chat {chat_id} was removed.")
+        except Exception: pass
 
 async def on_learn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
@@ -1424,6 +1595,27 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Log group messages for summaries
     if chat.type in ("group", "supergroup"):
         store.log_message(chat.id, user.id, name, text, update.message.message_id)
+    # Step-by-step input (easy /addfaq, /setrules, /setwelcome flows):
+    # if this user is mid-flow in this chat, this message is their answer.
+    if chat.type in ("group", "supergroup"):
+        _pend = PENDING_INPUT.get((chat.id, user.id))
+        if _pend:
+            _kind = _pend["kind"]
+            if _kind == "faq_q":
+                PENDING_INPUT[(chat.id, user.id)] = {"kind": "faq_a", "q": text.strip().lower()[:120]}
+                await update.message.reply_text("Got it. Now send the *answer* for that question.", parse_mode=ParseMode.MARKDOWN)
+                return
+            PENDING_INPUT.pop((chat.id, user.id), None)
+            if _kind == "faq_a":
+                store.faq_add(chat.id, _pend["q"], text.strip()[:1000], user.id)
+                await update.message.reply_text(f"✅ FAQ saved: '{_pend['q']}' — typing that question in chat now answers it.")
+            elif _kind == "rules":
+                store.set_setting(chat.id, "rules_text", text.strip()[:2000])
+                await update.message.reply_text("📜 Rules saved — /rules or #rules shows them.")
+            elif _kind == "welcome":
+                store.set_setting(chat.id, "welcome_text", text.strip()[:2000])
+                await update.message.reply_text("👋 Welcome note saved — new joiners will see it.")
+            return
     # Hashtag topics (groups): #memo, #scammed, ... get a ready answer
     if chat.type in ("group", "supergroup"):
         _tag = _first_hashtag(text)
@@ -1471,7 +1663,7 @@ async def post_init(app: Application):
         await app.bot.set_my_short_description("Summarizes hundreds of group messages into a quick summary + AI assistant.")
         await app.bot.set_my_commands([
             ("summary","Summarize group messages"),("catchup","What you missed"),("tldr","Shrink a message (reply to it)"),
-            ("ask","Ask me anything"),("proposals","Proposals voting now"),("proposal","Proposal + tally"),("price","LUNC + USTC price"),("stats","Chain stats"),("burn","Live burn tax info"),("burnalerts","Burn notifications on/off"),("govalerts","Proposal alerts on/off"),("wallet","Public wallet lookup"),("token","CW20 token info"),("validators","Top validators"),("watchvalidator","Watch a validator"),("rank","Your rank in this chat"),("language","Choose your language"),("privacy","Privacy & security info"),("protect","Request scam protection (group admins)"),("rules","This group's rules"),("help","All commands")])
+            ("ask","Ask me anything"),("proposals","Proposals voting now"),("proposal","Proposal + tally"),("price","LUNC + USTC price"),("stats","Chain stats"),("burn","Live burn tax info"),("burnalerts","Burn notifications on/off"),("govalerts","Proposal alerts on/off"),("wallet","Public wallet lookup"),("token","CW20 token info"),("validators","Top validators"),("watchvalidator","Watch a validator"),("rank","Your rank in this chat"),("language","Choose your language"),("privacy","Privacy & security info"),("protect","Request scam protection (group admins)"),("rules","This group's rules"),("menu","Buttons menu — no typing"),("panel","Admin panel (group admins)"),("help","All commands")])
         # Profile photo (owner's logo) — re-applied on boot so redeploys never lose it
         try:
             from telegram import InputProfilePhotoStatic
@@ -1552,6 +1744,12 @@ def main():
     app.add_handler(CommandHandler("faq", on_faq))
     app.add_handler(CommandHandler("addfaq", on_addfaq))
     app.add_handler(CommandHandler("delfaq", on_delfaq))
+    app.add_handler(CommandHandler("menu", on_menu))
+    app.add_handler(CommandHandler("panel", on_panel))
+    app.add_handler(CommandHandler("cancel", on_cancel))
+    app.add_handler(CallbackQueryHandler(on_menu_callback, pattern=r"^menu:"))
+    app.add_handler(CallbackQueryHandler(on_panel_callback, pattern=r"^panel:"))
+    app.add_handler(CallbackQueryHandler(on_mod_callback, pattern=r"^mod:"))
     app.add_handler(CallbackQueryHandler(on_captcha_callback, pattern=r"^cap:"))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_new_members))
     app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_left_member))

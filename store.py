@@ -479,3 +479,8 @@ def faq_list(chat_id):
     rows = c.execute("SELECT question FROM faq WHERE chat_id=? ORDER BY question",
                      (chat_id,)).fetchall()
     c.close(); return [r["question"] for r in rows]
+
+def pending_groups():
+    c = _conn()
+    rows = c.execute("SELECT * FROM mod_groups WHERE approved=0 ORDER BY chat_id").fetchall()
+    c.close(); return rows
