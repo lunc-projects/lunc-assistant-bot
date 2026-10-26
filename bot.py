@@ -8,6 +8,7 @@ import os, re, time, json, datetime, pathlib, asyncio
 import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions, WebAppInfo, InlineQueryResultGame
 from telegram.constants import ParseMode
+from telegram.error import BadRequest
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, InlineQueryHandler, filters, ContextTypes
 import store, ai_client, burn as burn_mod, chain, lang as lang_mod, ratelimit, budget, modquiz, topics, seclogic, alerts as alerts_mod, github_pr
 from kb import kb_as_text, find_kb_answer
@@ -260,10 +261,16 @@ async def on_lang_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     code = (q.data or "").split(":", 1)[1] if ":" in (q.data or "") else ""
     if code not in lang_mod.CODES:
         await q.answer("Unknown language."); return
+    if code == user_lang(update):
+        await q.answer("Already set."); return
     store.set_user_lang(update.effective_user.id, code)
     await q.answer()
-    await q.edit_message_text(lang_mod.t("picked", code, name=lang_mod.LABELS[code]),
-                              reply_markup=lang_mod.lang_keyboard())
+    try:
+        await q.edit_message_text(lang_mod.t("picked", code, name=lang_mod.LABELS[code]),
+                                  reply_markup=lang_mod.lang_keyboard())
+    except BadRequest as e:
+        if "Message is not modified" not in str(e):
+            raise
 
 AI_BANNED_NOTE = (
     "🚫 AI is off for your account — a moderator put an AI ban on it. "

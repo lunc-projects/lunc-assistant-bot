@@ -62,6 +62,16 @@ constants = types.ModuleType("telegram.constants")
 constants.ParseMode = types.SimpleNamespace(MARKDOWN="Markdown", HTML="HTML")
 tg.constants = constants
 
+error = types.ModuleType("telegram.error")
+
+
+class _BadRequest(Exception):
+    pass
+
+
+error.BadRequest = _BadRequest
+tg.error = error
+
 ext = types.ModuleType("telegram.ext")
 
 
@@ -82,6 +92,7 @@ tg.ext = ext
 
 sys.modules["telegram"] = tg
 sys.modules["telegram.constants"] = constants
+sys.modules["telegram.error"] = error
 sys.modules["telegram.ext"] = ext
 
 import bot
