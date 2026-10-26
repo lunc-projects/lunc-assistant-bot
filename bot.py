@@ -623,25 +623,25 @@ BREAKOUT_URL = "https://frg-fight-club.vercel.app/breakout/"
 # Native Telegram Games (registered in BotFather for this bot). The short
 # names are the identifiers Telegram sends back when a player taps Play.
 TELEGRAM_GAMES = (
-    ("neonrush", "🏎 Play NEON RUSH", NEON_RUSH_URL),
-    ("solitaire", "🃏 Play SOLITAIRE", SOLITAIRE_URL),
-    ("hoops", "🏀 Play HOOPS", HOOPS_URL),
-    ("Penalty", "⚽ Play PENALTY KICK", PENALTY_URL),
-    ("Darts", "🎯 Play DARTS", DARTS_URL),
-    ("LunaBlocks", "🧩 Play LUNA BLOCKS", BLOCKS_URL),
-    ("Lunagolf", "⛳ Play LUNA GOLF", GOLF_URL),
-    ("LunaDefender", "🚀 Play LUNA DEFENDER", DEFENDER_URL),
-    ("LunaTower", "🏗 Play LUNA TOWER", TOWER_URL),
-    ("LunaSnake", "🐍 Play LUNA SNAKE", SNAKE_URL),
-    ("LunaFlap", "🚀 Play LUNA FLAP", FLAP_URL),
-    ("LunaPinball", "🎪 Play LUNA PINBALL", PINBALL_URL),
-    ("LunaRacer", "🏎 Play LUNA RACER", RACER_URL),
-    ("LunaCannon", "💥 Play LUNA CANNON", CANNON_URL),
-    ("LunaWhack", "👽 Play LUNA WHACK", WHACK_URL),
-    ("LunaRider", "🏍 Play LUNA RIDER", RIDER_URL),
-    ("LunaPool", "🎱 Play LUNA POOL", POOL_URL),
-    ("LunaZombie", "🧟 Play ZOMBIE DEFENSE", ZOMBIE_URL),
-    ("LunaBreakout", "🧱 Play LUNA BREAKOUT", BREAKOUT_URL),
+    ("neonrush", "🏎 NEON RUSH", NEON_RUSH_URL),
+    ("solitaire", "🃏 SOLITAIRE", SOLITAIRE_URL),
+    ("hoops", "🏀 HOOPS", HOOPS_URL),
+    ("Penalty", "⚽ PENALTY KICK", PENALTY_URL),
+    ("Darts", "🎯 DARTS", DARTS_URL),
+    ("LunaBlocks", "🧩 LUNA BLOCKS", BLOCKS_URL),
+    ("Lunagolf", "⛳ LUNA GOLF", GOLF_URL),
+    ("LunaDefender", "🚀 LUNA DEFENDER", DEFENDER_URL),
+    ("LunaTower", "🏗 LUNA TOWER", TOWER_URL),
+    ("LunaSnake", "🐍 LUNA SNAKE", SNAKE_URL),
+    ("LunaFlap", "🚀 LUNA FLAP", FLAP_URL),
+    ("LunaPinball", "🎪 LUNA PINBALL", PINBALL_URL),
+    ("LunaRacer", "🏎 LUNA RACER", RACER_URL),
+    ("LunaCannon", "💥 LUNA CANNON", CANNON_URL),
+    ("LunaWhack", "👽 LUNA WHACK", WHACK_URL),
+    ("LunaRider", "🏍 LUNA RIDER", RIDER_URL),
+    ("LunaPool", "🎱 LUNA POOL", POOL_URL),
+    ("LunaZombie", "🧟 ZOMBIE DEFENSE", ZOMBIE_URL),
+    ("LunaBreakout", "🧱 LUNA BREAKOUT", BREAKOUT_URL),
 )
 GAME_URL_BY_SHORT_NAME = {short: url for short, _, url in TELEGRAM_GAMES}
 # Telegram echoes the short name exactly as registered in BotFather, which
@@ -706,25 +706,9 @@ async def game_top5_text():
 async def on_games(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat is not None and chat.type == "private":
-        rows = [[InlineKeyboardButton("🏎 Play NEON RUSH", web_app=WebAppInfo(url=NEON_RUSH_URL))],
-                [InlineKeyboardButton("🃏 Play SOLITAIRE", web_app=WebAppInfo(url=SOLITAIRE_URL))],
-                [InlineKeyboardButton("🏀 Play HOOPS", web_app=WebAppInfo(url=HOOPS_URL))],
-                [InlineKeyboardButton("⚽ Play PENALTY KICK", web_app=WebAppInfo(url=PENALTY_URL))],
-                [InlineKeyboardButton("🎯 Play DARTS", web_app=WebAppInfo(url=DARTS_URL))],
-                [InlineKeyboardButton("🧩 Play LUNA BLOCKS", web_app=WebAppInfo(url=BLOCKS_URL))],
-                [InlineKeyboardButton("⛳ Play LUNA GOLF", web_app=WebAppInfo(url=GOLF_URL))],
-                [InlineKeyboardButton("🚀 Play LUNA DEFENDER", web_app=WebAppInfo(url=DEFENDER_URL))],
-                [InlineKeyboardButton("🏗 Play LUNA TOWER", web_app=WebAppInfo(url=TOWER_URL))],
-                [InlineKeyboardButton("🐍 Play LUNA SNAKE", web_app=WebAppInfo(url=SNAKE_URL))],
-                [InlineKeyboardButton("🚀 Play LUNA FLAP", web_app=WebAppInfo(url=FLAP_URL))],
-                [InlineKeyboardButton("🎪 Play LUNA PINBALL", web_app=WebAppInfo(url=PINBALL_URL))],
-                [InlineKeyboardButton("🏎 Play LUNA RACER", web_app=WebAppInfo(url=RACER_URL))],
-                [InlineKeyboardButton("💥 Play LUNA CANNON", web_app=WebAppInfo(url=CANNON_URL))],
-                [InlineKeyboardButton("👽 Play LUNA WHACK", web_app=WebAppInfo(url=WHACK_URL))],
-                [InlineKeyboardButton("🏍 Play LUNA RIDER", web_app=WebAppInfo(url=RIDER_URL))],
-                [InlineKeyboardButton("🎱 Play LUNA POOL", web_app=WebAppInfo(url=POOL_URL))],
-                [InlineKeyboardButton("🧟 Play ZOMBIE DEFENSE", web_app=WebAppInfo(url=ZOMBIE_URL))],
-                [InlineKeyboardButton("🧱 Play LUNA BREAKOUT", web_app=WebAppInfo(url=BREAKOUT_URL))]]
+        _btns = [InlineKeyboardButton(label, web_app=WebAppInfo(url=_url))
+                 for _short, label, _url in TELEGRAM_GAMES]
+        rows = [_btns[i:i + 2] for i in range(0, len(_btns), 2)]
         await update.effective_message.reply_text(GAMES_TEXT, parse_mode=ParseMode.MARKDOWN,
             reply_markup=InlineKeyboardMarkup(rows))
         return
@@ -732,8 +716,9 @@ async def on_games(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Groups: ONE picker post, never a flood of game cards. The message
     # carries every game's Top 5 and one button per game; a member taps
     # the game they want and only that game's card posts (on_pick_callback).
-    rows = [[InlineKeyboardButton(label, callback_data=f"pick:{short_name}")]
-            for short_name, label, _url in TELEGRAM_GAMES]
+    _pick = [InlineKeyboardButton(label, callback_data=f"pick:{short_name}")
+             for short_name, label, _url in TELEGRAM_GAMES]
+    rows = [_pick[i:i + 2] for i in range(0, len(_pick), 2)]
     text = "🎮 *Luna Classic games*\n\n" + await game_top5_text() + "\n\n👇 *Pick a game* — tap one and only that game posts."
     await update.effective_message.reply_text(text, parse_mode=ParseMode.MARKDOWN,
         reply_markup=InlineKeyboardMarkup(rows))
