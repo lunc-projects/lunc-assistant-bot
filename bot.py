@@ -589,7 +589,7 @@ TELEGRAM_GAMES = (
     ("hoops", "🏀 Play HOOPS", HOOPS_URL),
     ("penalty", "⚽ Play PENALTY KICK", PENALTY_URL),
     ("darts", "🎯 Play DARTS", DARTS_URL),
-    ("blocks", "🧩 Play LUNA BLOCKS", BLOCKS_URL),
+    ("LunaBlocks", "🧩 Play LUNA BLOCKS", BLOCKS_URL),
 )
 GAME_URL_BY_SHORT_NAME = {short: url for short, _, url in TELEGRAM_GAMES}
 # Telegram echoes the short name exactly as registered in BotFather, which
@@ -603,9 +603,9 @@ GAME_BOARD_APIS = (
     ("neonrush", "🏎 *NEON RUSH*", "https://frg-fight-club.vercel.app/api/neon-rush-board"),
     ("solitaire", "🃏 *SOLITAIRE*", "https://frg-fight-club.vercel.app/api/solitaire-board"),
     ("hoops", "🏀 *HOOPS*", "https://frg-fight-club.vercel.app/api/hoops-board"),
-    ("penalty", "⚽ *PENALTY KICK*", "https://frg-fight-club.vercel.app/api/penalty-board"),
-    ("darts", "🎯 *DARTS*", "https://frg-fight-club.vercel.app/api/darts-board"),
-    ("blocks", "🧩 *LUNA BLOCKS*", "https://frg-fight-club.vercel.app/api/blocks-board"),
+    ("penalty", "⚽ *PENALTY KICK*", "https://frg-fight-club.vercel.app/api/luna-games?game=penalty"),
+    ("darts", "🎯 *DARTS*", "https://frg-fight-club.vercel.app/api/luna-games?game=darts"),
+    ("LunaBlocks", "🧩 *LUNA BLOCKS*", "https://frg-fight-club.vercel.app/api/luna-games?game=blocks"),
 )
 
 async def _fetch_board(url):
