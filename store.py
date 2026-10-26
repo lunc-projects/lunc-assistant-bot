@@ -610,3 +610,77 @@ def pending_groups():
     c = _conn()
     rows = c.execute("SELECT * FROM mod_groups WHERE approved=0 ORDER BY chat_id").fetchall()
     c.close(); return rows
+
+# --- GitHub PR watch (2026-10-25) ---
+# Per-chat subscriptions: which repos a chat follows for PR news, and
+# the forum topic (thread id) the enabling command was run in, if any.
+# The master switch is a normal chat setting (pr_alerts, default OFF),
+# same pattern as burn/gov alerts. Poller cursors/snapshots live in
+# pr_repo_state, one JSON blob per repo, so restarts never re-post
+# history. Only group config + cursors are stored — no message data.
+
+def _ensure_pr_tables(c):
+    c.execute("""CREATE TABLE IF NOT EXISTS pr_subscriptions(
+        chat_id INTEGER, repo TEXT, thread_id INTEGER,
+        PRIMARY KEY(chat_id, repo))""")
+    c.execute("""CREATE TABLE IF NOT EXISTS pr_repo_state(
+        repo TEXT PRIMARY KEY, state TEXT, updated INTEGER)""")
+
+def pr_alerts_enabled(chat_id):
+    return get_setting(chat_id, "pr_alerts", "off") == "on"
+
+def set_pr_alerts(chat_id, on):
+    set_setting(chat_id, "pr_alerts", "on" if on else "off")
+
+def chats_with_pr_on():
+    c = _conn()
+    rows = c.execute("SELECT chat_id FROM chat_settings WHERE key='pr_alerts' AND value='on'").fetchall()
+    c.close()
+    return [r["chat_id"] for r in rows]
+
+def pr_watch_add(chat_id, repo, thread_id=None):
+    c = _conn(); _ensure_pr_tables(c)
+    c.execute("""INSERT INTO pr_subscriptions(chat_id, repo, thread_id) VALUES(?,?,?)
+                 ON CONFLICT(chat_id, repo) DO UPDATE SET
+                 thread_id=COALESCE(excluded.thread_id, pr_subscriptions.thread_id)""",
+              (chat_id, repo, thread_id))
+    c.commit(); c.close()
+
+def pr_watch_remove(chat_id, repo):
+    c = _conn(); _ensure_pr_tables(c)
+    cur = c.execute("DELETE FROM pr_subscriptions WHERE chat_id=? AND repo=?", (chat_id, repo))
+    c.commit(); n = cur.rowcount; c.close(); return n
+
+def pr_watch_list(chat_id=None):
+    c = _conn(); _ensure_pr_tables(c)
+    if chat_id is None:
+        rows = c.execute("SELECT * FROM pr_subscriptions ORDER BY chat_id, repo").fetchall()
+    else:
+        rows = c.execute("SELECT * FROM pr_subscriptions WHERE chat_id=? ORDER BY repo", (chat_id,)).fetchall()
+    c.close(); return [dict(r) for r in rows]
+
+def pr_active_subscriptions():
+    """Subscription rows whose chat actually has PR alerts switched ON."""
+    c = _conn(); _ensure_pr_tables(c)
+    rows = c.execute("""SELECT s.* FROM pr_subscriptions s
+                        JOIN chat_settings cs ON cs.chat_id = s.chat_id
+                        AND cs.key = 'pr_alerts' AND cs.value = 'on'
+                        ORDER BY s.repo, s.chat_id""").fetchall()
+    c.close(); return [dict(r) for r in rows]
+
+import json as _json
+
+def pr_get_state(repo):
+    c = _conn(); _ensure_pr_tables(c)
+    r = c.execute("SELECT state FROM pr_repo_state WHERE repo=?", (repo,)).fetchone()
+    c.close()
+    if not r: return None
+    try: return _json.loads(r["state"])
+    except Exception: return None
+
+def pr_set_state(repo, state_dict):
+    c = _conn(); _ensure_pr_tables(c)
+    c.execute("""INSERT INTO pr_repo_state(repo, state, updated) VALUES(?,?,?)
+                 ON CONFLICT(repo) DO UPDATE SET state=excluded.state, updated=excluded.updated""",
+              (repo, _json.dumps(state_dict), int(_time.time())))
+    c.commit(); c.close()

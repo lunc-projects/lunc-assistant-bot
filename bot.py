@@ -4,16 +4,19 @@ Core: summarize hundreds of messages into a quick summary.
 Also: /catchup, /tldr, /ask (general AI Q&A), DM summary. Standalone — no other projects included.
 Run: TELEGRAM_BOT_TOKEN=... AI_API_KEY=... python bot.py
 """
-import os, re, time, json, datetime, pathlib
+import os, re, time, json, datetime, pathlib, asyncio
 import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions, WebAppInfo, InlineQueryResultGame
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, InlineQueryHandler, filters, ContextTypes
-import store, ai_client, burn as burn_mod, chain, lang as lang_mod, ratelimit, budget, modquiz, topics, seclogic, alerts as alerts_mod
+import store, ai_client, burn as burn_mod, chain, lang as lang_mod, ratelimit, budget, modquiz, topics, seclogic, alerts as alerts_mod, github_pr
 from kb import kb_as_text, find_kb_answer
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 OWNER_ID = int(os.getenv("OWNER_TELEGRAM_ID", "0") or 0)
+# Optional: the bot's own GitHub login, so PR notifications skip events
+# it authored itself. Unused when unset.
+GITHUB_BOT_LOGIN = os.getenv("GITHUB_BOT_LOGIN", "")
 # AI kill switch — True means AI features are live, governed by rank,
 # daily caps, and the daily token pot (budget.py: 200,000/day, the Groq
 # free allowance). Flip to False to disable ALL AI again. Simple (non-AI)
@@ -101,6 +104,9 @@ Type a hashtag in chat — #memo, #scammed, #ibctransfer, #safety… — and I'l
 *Notifications (your choice, on/off)*
 /burnalerts — burn notifications menu (master on/off + types)
 /govalerts — proposal / voting notifications menu (new, ending soon, result)
+/pr <owner/repo> <number> — GitHub pull request info (or /pr <PR link>, or just /pr <number> if this chat watches one repo)
+/pralerts on/off — GitHub PR notifications for this chat (new PRs, comments, reviews, merges)
+/prwatch — GitHub repos this chat follows · /prwatch add <owner/repo> · /prwatch remove <owner/repo>
 /watchvalidator <name or terravaloper...> — watch a validator in this chat
 /unwatchvalidator <terravaloper...> — stop watching
 /watchlist — validators watched in this chat
@@ -1652,7 +1658,7 @@ MENU_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("🗳 Proposals", callback_data="menu:proposals"), InlineKeyboardButton("🛡 Safety", callback_data="menu:safety")],
     [InlineKeyboardButton("🔗 Links", callback_data="menu:links"), InlineKeyboardButton("🔒 Privacy", callback_data="menu:privacy")],
     [InlineKeyboardButton("📜 Group rules", callback_data="menu:rules"), InlineKeyboardButton("❓ Group FAQ", callback_data="menu:faq")],
-    [InlineKeyboardButton("🔄 DEXes", callback_data="menu:dex")],
+    [InlineKeyboardButton("🔄 DEXes", callback_data="menu:dex"), InlineKeyboardButton("🔀 GitHub PRs", callback_data="menu:pr")],
 ])
 
 async def on_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1693,6 +1699,18 @@ async def on_menu_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             text = ("❓ This group's FAQs:\n" + "\n".join(f"• {x}" for x in qs) + "\n\nAsk one with /faq <question> — or just type the question in chat.") if qs else "No FAQs saved for this group yet. An admin can add one with /addfaq."
         else:
             text = "Group FAQs live in groups — tap ❓ inside a group."
+    elif action == "pr":
+        md = False
+        rows = store.pr_watch_list(chat.id)
+        state = "ON" if store.pr_alerts_enabled(chat.id) else "OFF"
+        if rows:
+            text = (f"🔀 GitHub PR notifications: {state} for this chat\nWatching:\n"
+                    + "\n".join(f"• {r['repo']}" for r in rows)
+                    + "\n\nLook one up: /pr <owner/repo> <number>\nAdmins manage this with /pralerts and /prwatch.")
+        else:
+            text = ("🔀 GitHub PR notifications: no repos watched in this chat yet.\n"
+                    "Look one up: /pr <owner/repo> <number>\n"
+                    "Admins can follow a repo with /prwatch add <owner/repo>, then /pralerts on.")
     else:
         return
     await ctx.bot.send_message(chat.id, text, parse_mode=ParseMode.MARKDOWN if md else None)
@@ -1832,7 +1850,7 @@ async def on_gov_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await q.edit_message_text(gov_status_text(cid), reply_markup=gov_keyboard(cid), parse_mode=ParseMode.MARKDOWN)
 
 async def on_settings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⚙️ *Settings — notifications are your choice*\n🔥 /burnalerts — burn notifications\n🗳️ /govalerts — proposal & voting notifications\n🏛️ /watchlist — validators watched in this chat", parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text("⚙️ *Settings — notifications are your choice*\n🔥 /burnalerts — burn notifications\n🗳️ /govalerts — proposal & voting notifications\n🔀 /pralerts — GitHub PR notifications (repos: /prwatch)\n🏛️ /watchlist — validators watched in this chat", parse_mode=ParseMode.MARKDOWN)
 
 # ================= VALIDATOR WATCH =================
 async def on_watchvalidator(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1854,6 +1872,92 @@ async def on_watchlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not rows: await update.message.reply_text("No validators watched in this chat yet. Add one: /watchvalidator <name>"); return
     lines = ["👀 *Watched in this chat:*"] + [f"• {r['moniker']} — {r['valoper']}" for r in rows]
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+# ================= GITHUB PR INFO + ALERTS =================
+def _msg_thread(update):
+    """Forum topic the command was run in, if any — notifications for a
+    subscription created there post back into that same topic."""
+    return getattr(update.message, "message_thread_id", None)
+
+async def _can_change_pr(update, ctx):
+    """PR settings: the bot owner, or a group admin (in DM: the user)."""
+    return _is_owner(update.effective_user.id) or await _can_change(update, ctx)
+
+def pr_alerts_text(chat_id):
+    on = store.pr_alerts_enabled(chat_id)
+    rows = store.pr_watch_list(chat_id)
+    lines = [f"🔀 *GitHub PR notifications: {'ON' if on else 'OFF'}* for this chat"]
+    if rows:
+        lines.append("Watching:")
+        lines += [f"• {r['repo']}" for r in rows]
+    else:
+        lines.append("No repos watched yet — /prwatch add <owner/repo>")
+    lines.append("Usage: /pralerts on · /pralerts off · /prwatch add <owner/repo> · /pr <owner/repo> <number>")
+    return "\n".join(lines)
+
+async def on_pralerts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    arg = (ctx.args or [""])[0].lower()
+    if arg in ("on", "off"):
+        if not await _can_change_pr(update, ctx):
+            await update.message.reply_text("Only group admins can change this group's settings."); return
+        on = arg == "on"
+        store.set_pr_alerts(chat.id, on)
+        if on and not store.pr_watch_list(chat.id):
+            for repo in github_pr.DEFAULT_REPOS:
+                store.pr_watch_add(chat.id, repo, _msg_thread(update))
+            await update.message.reply_text(
+                "🔀 PR notifications ON — no repos were configured for this chat, so it now watches the defaults:\n"
+                + "\n".join("• " + r for r in github_pr.DEFAULT_REPOS)
+                + "\nChange them with /prwatch add <owner/repo> · /prwatch remove <owner/repo>")
+            return
+    await update.message.reply_text(pr_alerts_text(chat.id), parse_mode=ParseMode.MARKDOWN)
+
+async def on_prwatch(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    args = ctx.args or []
+    sub = args[0].lower() if args else ""
+    if sub in ("add", "remove"):
+        if not await _can_change_pr(update, ctx):
+            await update.message.reply_text("Only group admins can change this group's settings."); return
+        if len(args) < 2 or not github_pr.valid_repo(args[1]):
+            await update.message.reply_text("Usage: /prwatch add <owner/repo> — e.g. /prwatch add terra-classic-io/website"); return
+        repo = args[1]
+        if sub == "add":
+            store.pr_watch_add(chat.id, repo, _msg_thread(update))
+            note = "" if store.pr_alerts_enabled(chat.id) else "\nNotifications are OFF for this chat — turn them on with /pralerts on."
+            await update.message.reply_text(f"👀 Watching {repo} in this chat.{note}")
+        else:
+            n = store.pr_watch_remove(chat.id, repo)
+            await update.message.reply_text(f"Stopped watching {repo} in this chat." if n else f"{repo} isn't on this chat's watch list.")
+        return
+    rows = store.pr_watch_list(chat.id)
+    if not rows:
+        await update.message.reply_text("No repos watched in this chat yet. Add one: /prwatch add <owner/repo>\nNotifications are managed with /pralerts on · /pralerts off."); return
+    state = "ON" if store.pr_alerts_enabled(chat.id) else "OFF"
+    lines = [f"👀 *PR watch — notifications {state}*"] + [f"• {r['repo']}" for r in rows]
+    lines.append("Add: /prwatch add <owner/repo> · Remove: /prwatch remove <owner/repo>")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+async def on_pr(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    watched = [r["repo"] for r in store.pr_watch_list(update.effective_chat.id)]
+    repo, number, err = github_pr.parse_pr_args(ctx.args, watched)
+    if err:
+        await update.message.reply_text(err); return
+    try:
+        pr, latest = await github_pr.fetch_pr_detail(repo, number)
+    except github_pr.GhError as e:
+        if e.status == 404:
+            await update.message.reply_text(f"Couldn't find PR #{number} in {repo} — check the repo and number.")
+        elif github_pr.is_rate_limited(e):
+            await update.message.reply_text("GitHub is rate-limiting right now — try again in a bit.")
+        else:
+            await update.message.reply_text("Couldn't fetch that PR from GitHub right now.")
+        return
+    except Exception:
+        await update.message.reply_text("Couldn't fetch that PR from GitHub right now.")
+        return
+    await update.message.reply_text(github_pr.format_pr_detail(repo, pr, latest))
 
 # ================= WATCH JOBS =================
 async def job_gov_check(ctx: ContextTypes.DEFAULT_TYPE):
@@ -1919,6 +2023,39 @@ async def job_validator_check(ctx: ContextTypes.DEFAULT_TYPE):
                 try: await ctx.bot.send_message(r["chat_id"], f"🏛️ Validator watch — *{r['moniker']}*\n" + "\n".join("• " + a for a in alerts), parse_mode=ParseMode.MARKDOWN)
                 except Exception: pass
             store.update_snapshot(r["chat_id"], valoper, json.dumps(new))
+
+# --- Background GitHub PR checks (job queue, ~5 min) ---
+PR_SEND_GAP = 1.0   # max ~1 notification per second per chat
+_PR_LAST_SEND = {}  # chat_id -> last notification ts (in-memory pacing)
+
+async def job_pr_check(ctx: ContextTypes.DEFAULT_TYPE):
+    subs = store.pr_active_subscriptions()
+    if not subs: return
+    by_repo = {}
+    for s in subs: by_repo.setdefault(s["repo"], []).append(s)
+    skip = (GITHUB_BOT_LOGIN,) if GITHUB_BOT_LOGIN else ()
+    for repo, rows in by_repo.items():
+        try:
+            events, new_state = await github_pr.poll_repo(repo, store.pr_get_state(repo), skip_logins=skip)
+        except github_pr.GhError as e:
+            # 403/429 = GitHub rate limit: back off quietly, retry next cycle.
+            print(f"pr poll {repo}: GitHub HTTP {e.status} — backing off this cycle")
+            return
+        except Exception as e:
+            print(f"pr poll {repo}: {e}")
+            continue
+        store.pr_set_state(repo, new_state)
+        for ev in events:
+            text = github_pr.format_event(ev)
+            for s in rows:
+                cid = s["chat_id"]
+                wait = PR_SEND_GAP - (time.time() - _PR_LAST_SEND.get(cid, 0))
+                if wait > 0: await asyncio.sleep(wait)
+                kw = {"message_thread_id": s["thread_id"]} if s.get("thread_id") else {}
+                try:
+                    await ctx.bot.send_message(cid, text, **kw)
+                    _PR_LAST_SEND[cid] = time.time()
+                except Exception: pass
 
 # --- Background burn checks (job queue) ---
 async def job_burn_check(ctx: ContextTypes.DEFAULT_TYPE):
@@ -2226,7 +2363,7 @@ async def post_init(app: Application):
         await app.bot.set_my_short_description("Summarizes hundreds of group messages into a quick summary + AI assistant.")
         await app.bot.set_my_commands([
             ("summary","Summarize group messages"),("catchup","What you missed"),("tldr","Shrink a message (reply to it)"),
-            ("ask","Ask me anything"),("proposals","Proposals voting now"),("proposal","Proposal + tally"),("price","LUNC + USTC price"),("stats","Chain stats"),("burn","Live burn tax info"),("burnalerts","Burn notifications on/off"),("govalerts","Proposal alerts on/off"),("wallet","Public wallet lookup"),("token","CW20 token info"),("validators","Top validators"),("watchvalidator","Watch a validator"),("rank","Your rank in this chat"),("language","Choose your language"),("privacy","Privacy & security info"),("dex","DEXes on Luna Classic"),("freegames","Play Luna Classic games"),("protect","Request scam protection (group admins)"),("aiban","AI-ban a user (moderators)"),("appeal","Appeal a ban (in DM)"),("rules","This group's rules"),("menu","Buttons menu — no typing"),("panel","Admin panel (group admins)"),("help","All commands")])
+            ("ask","Ask me anything"),("proposals","Proposals voting now"),("proposal","Proposal + tally"),("price","LUNC + USTC price"),("stats","Chain stats"),("burn","Live burn tax info"),("burnalerts","Burn notifications on/off"),("govalerts","Proposal alerts on/off"),("pr","GitHub PR info"),("pralerts","GitHub PR alerts on/off"),("prwatch","Repos watched for PR alerts"),("wallet","Public wallet lookup"),("token","CW20 token info"),("validators","Top validators"),("watchvalidator","Watch a validator"),("rank","Your rank in this chat"),("language","Choose your language"),("privacy","Privacy & security info"),("dex","DEXes on Luna Classic"),("freegames","Play Luna Classic games"),("protect","Request scam protection (group admins)"),("aiban","AI-ban a user (moderators)"),("appeal","Appeal a ban (in DM)"),("rules","This group's rules"),("menu","Buttons menu — no typing"),("panel","Admin panel (group admins)"),("help","All commands")])
         # Profile photo (owner's logo) — re-applied on boot so redeploys never lose it
         try:
             from telegram import InputProfilePhotoStatic
@@ -2280,6 +2417,9 @@ def main():
     app.add_handler(CommandHandler("safety", on_safety))
     app.add_handler(CommandHandler("learn", on_learn))
     app.add_handler(CommandHandler("govalerts", on_govalerts))
+    app.add_handler(CommandHandler("pr", on_pr))
+    app.add_handler(CommandHandler("pralerts", on_pralerts))
+    app.add_handler(CommandHandler("prwatch", on_prwatch))
     app.add_handler(CommandHandler("watchvalidator", on_watchvalidator))
     app.add_handler(CommandHandler("unwatchvalidator", on_unwatchvalidator))
     app.add_handler(CommandHandler("watchlist", on_watchlist))
@@ -2342,6 +2482,7 @@ def main():
         app.job_queue.run_repeating(job_burn_check, interval=3600, first=120)
         app.job_queue.run_repeating(job_gov_check, interval=1800, first=180)
         app.job_queue.run_repeating(job_validator_check, interval=3600, first=240)
+        app.job_queue.run_repeating(job_pr_check, interval=300, first=260)
         app.job_queue.run_repeating(job_captcha_sweep, interval=60, first=30)
         app.job_queue.run_repeating(job_fresh_sweep, interval=600, first=90)
         app.job_queue.run_repeating(job_scam_alerts, interval=1800, first=300)
