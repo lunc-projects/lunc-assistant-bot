@@ -593,6 +593,8 @@ GAMES_TEXT = (
     "🚀 *LUNA FLAP* — one-tap flying. Tap to flap the little moon lander through the crater pillars. Thread a gate for +10 and snatch the coins floating in the gaps.\n\n"
     "🎪 *LUNA PINBALL* — a moon-base pinball table. Launch the ball, work the flippers, light up the LUNC bumpers and the target bank. Three balls — make them count.\n\n"
     "🏎 *LUNA RACER* — full-throttle moon racing. Weave the winding lunar road, sweep up the LUNC coin arcs, snatch the rare USTC tokens, and don't trade paint with the rocks.\n\n"
+    "💥 *LUNA CANNON* — moon artillery. Drag to aim the arc and fire LUNC shells at the USTC targets. A direct hit pays 50 and a double pays bonus — 3 rounds, 8 shells each.\n\n"
+    "👽 *LUNA WHACK* — 60 seconds, nine craters. Whack the LUNC token critters and the rare USTC ones, build your streak multiplier — and whatever you do, don't tap the bombs.\n\n"
     "Tap a game to play — it opens right here in Telegram.")
 NEON_RUSH_URL = "https://frg-fight-club.vercel.app/neon-rush/"
 SOLITAIRE_URL = "https://frg-fight-club.vercel.app/solitaire/"
@@ -607,6 +609,8 @@ SNAKE_URL = "https://frg-fight-club.vercel.app/snake/"
 FLAP_URL = "https://frg-fight-club.vercel.app/flap/"
 PINBALL_URL = "https://frg-fight-club.vercel.app/pinball/"
 RACER_URL = "https://frg-fight-club.vercel.app/racer/"
+CANNON_URL = "https://frg-fight-club.vercel.app/cannon/"
+WHACK_URL = "https://frg-fight-club.vercel.app/whack/"
 
 # Native Telegram Games (registered in BotFather for this bot). The short
 # names are the identifiers Telegram sends back when a player taps Play.
@@ -624,6 +628,8 @@ TELEGRAM_GAMES = (
     ("LunaFlap", "🚀 Play LUNA FLAP", FLAP_URL),
     ("LunaPinball", "🎪 Play LUNA PINBALL", PINBALL_URL),
     ("LunaRacer", "🏎 Play LUNA RACER", RACER_URL),
+    ("LunaCannon", "💥 Play LUNA CANNON", CANNON_URL),
+    ("LunaWhack", "👽 Play LUNA WHACK", WHACK_URL),
 )
 GAME_URL_BY_SHORT_NAME = {short: url for short, _, url in TELEGRAM_GAMES}
 # Telegram echoes the short name exactly as registered in BotFather, which
@@ -647,6 +653,8 @@ GAME_BOARD_APIS = (
     ("LunaFlap", "🚀 *LUNA FLAP*", "https://frg-fight-club.vercel.app/api/luna-games?game=flap"),
     ("LunaPinball", "🎪 *LUNA PINBALL*", "https://frg-fight-club.vercel.app/api/luna-games?game=pinball"),
     ("LunaRacer", "🏎 *LUNA RACER*", "https://frg-fight-club.vercel.app/api/luna-games?game=racer"),
+    ("LunaCannon", "💥 *LUNA CANNON*", "https://frg-fight-club.vercel.app/api/luna-games?game=cannon"),
+    ("LunaWhack", "👽 *LUNA WHACK*", "https://frg-fight-club.vercel.app/api/luna-games?game=whack"),
 )
 
 async def _fetch_board(url):
@@ -694,7 +702,9 @@ async def on_games(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🐍 Play LUNA SNAKE", web_app=WebAppInfo(url=SNAKE_URL))],
                 [InlineKeyboardButton("🚀 Play LUNA FLAP", web_app=WebAppInfo(url=FLAP_URL))],
                 [InlineKeyboardButton("🎪 Play LUNA PINBALL", web_app=WebAppInfo(url=PINBALL_URL))],
-                [InlineKeyboardButton("🏎 Play LUNA RACER", web_app=WebAppInfo(url=RACER_URL))]]
+                [InlineKeyboardButton("🏎 Play LUNA RACER", web_app=WebAppInfo(url=RACER_URL))],
+                [InlineKeyboardButton("💥 Play LUNA CANNON", web_app=WebAppInfo(url=CANNON_URL))],
+                [InlineKeyboardButton("👽 Play LUNA WHACK", web_app=WebAppInfo(url=WHACK_URL))]]
         await update.message.reply_text(GAMES_TEXT, parse_mode=ParseMode.MARKDOWN,
             reply_markup=InlineKeyboardMarkup(rows))
         return
