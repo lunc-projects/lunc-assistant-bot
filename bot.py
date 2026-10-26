@@ -595,6 +595,10 @@ GAMES_TEXT = (
     "🏎 *LUNA RACER* — full-throttle moon racing. Weave the winding lunar road, sweep up the LUNC coin arcs, snatch the rare USTC tokens, and don't trade paint with the rocks.\n\n"
     "💥 *LUNA CANNON* — moon artillery. Drag to aim the arc and fire LUNC shells at the USTC targets. A direct hit pays 50 and a double pays bonus — 3 rounds, 8 shells each.\n\n"
     "👽 *LUNA WHACK* — 60 seconds, nine craters. Whack the LUNC token critters and the rare USTC ones, build your streak multiplier — and whatever you do, don't tap the bombs.\n\n"
+    "🏍 *LUNA RIDER* — motorcycle trials on the Moon. Feather the throttle over six brutal stages of ramps and gaps. Land backflips for bonus points without landing on your head.\n\n"
+    "🎱 *LUNA POOL* — moon pool. Pull back, aim, and sink all 8 moon balls in as few shots as you can. Every ball is worth 100 and clearing the rack pays a 250 bonus.\n\n"
+    "🧟 *ZOMBIE DEFENSE* — the horde is coming for the moon base. Hold three lanes, blast the waves, and spend your points on upgrades between rounds.\n\n"
+    "🧱 *LUNA BREAKOUT* — the arcade classic, Luna style. Smash the brick wall with paddle and ball — and when the glowing LUNC block drops, the whole wall lights up.\n\n"
     "Tap a game to play — it opens right here in Telegram.")
 NEON_RUSH_URL = "https://frg-fight-club.vercel.app/neon-rush/"
 SOLITAIRE_URL = "https://frg-fight-club.vercel.app/solitaire/"
@@ -611,6 +615,10 @@ PINBALL_URL = "https://frg-fight-club.vercel.app/pinball/"
 RACER_URL = "https://frg-fight-club.vercel.app/racer/"
 CANNON_URL = "https://frg-fight-club.vercel.app/cannon/"
 WHACK_URL = "https://frg-fight-club.vercel.app/whack/"
+RIDER_URL = "https://frg-fight-club.vercel.app/luna-rider/"
+POOL_URL = "https://frg-fight-club.vercel.app/pool/"
+ZOMBIE_URL = "https://frg-fight-club.vercel.app/zombie/"
+BREAKOUT_URL = "https://frg-fight-club.vercel.app/breakout/"
 
 # Native Telegram Games (registered in BotFather for this bot). The short
 # names are the identifiers Telegram sends back when a player taps Play.
@@ -630,6 +638,10 @@ TELEGRAM_GAMES = (
     ("LunaRacer", "🏎 Play LUNA RACER", RACER_URL),
     ("LunaCannon", "💥 Play LUNA CANNON", CANNON_URL),
     ("LunaWhack", "👽 Play LUNA WHACK", WHACK_URL),
+    ("LunaRider", "🏍 Play LUNA RIDER", RIDER_URL),
+    ("LunaPool", "🎱 Play LUNA POOL", POOL_URL),
+    ("LunaZombie", "🧟 Play ZOMBIE DEFENSE", ZOMBIE_URL),
+    ("LunaBreakout", "🧱 Play LUNA BREAKOUT", BREAKOUT_URL),
 )
 GAME_URL_BY_SHORT_NAME = {short: url for short, _, url in TELEGRAM_GAMES}
 # Telegram echoes the short name exactly as registered in BotFather, which
@@ -655,6 +667,10 @@ GAME_BOARD_APIS = (
     ("LunaRacer", "🏎 *LUNA RACER*", "https://frg-fight-club.vercel.app/api/luna-games?game=racer"),
     ("LunaCannon", "💥 *LUNA CANNON*", "https://frg-fight-club.vercel.app/api/luna-games?game=cannon"),
     ("LunaWhack", "👽 *LUNA WHACK*", "https://frg-fight-club.vercel.app/api/luna-games?game=whack"),
+    ("LunaRider", "🏍 *LUNA RIDER*", "https://frg-fight-club.vercel.app/api/luna-games?game=rider"),
+    ("LunaPool", "🎱 *LUNA POOL*", "https://frg-fight-club.vercel.app/api/luna-games?game=pool"),
+    ("LunaZombie", "🧟 *ZOMBIE DEFENSE*", "https://frg-fight-club.vercel.app/api/luna-games?game=zombie"),
+    ("LunaBreakout", "🧱 *LUNA BREAKOUT*", "https://frg-fight-club.vercel.app/api/luna-games?game=breakout"),
 )
 
 async def _fetch_board(url):
@@ -704,7 +720,11 @@ async def on_games(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🎪 Play LUNA PINBALL", web_app=WebAppInfo(url=PINBALL_URL))],
                 [InlineKeyboardButton("🏎 Play LUNA RACER", web_app=WebAppInfo(url=RACER_URL))],
                 [InlineKeyboardButton("💥 Play LUNA CANNON", web_app=WebAppInfo(url=CANNON_URL))],
-                [InlineKeyboardButton("👽 Play LUNA WHACK", web_app=WebAppInfo(url=WHACK_URL))]]
+                [InlineKeyboardButton("👽 Play LUNA WHACK", web_app=WebAppInfo(url=WHACK_URL))],
+                [InlineKeyboardButton("🏍 Play LUNA RIDER", web_app=WebAppInfo(url=RIDER_URL))],
+                [InlineKeyboardButton("🎱 Play LUNA POOL", web_app=WebAppInfo(url=POOL_URL))],
+                [InlineKeyboardButton("🧟 Play ZOMBIE DEFENSE", web_app=WebAppInfo(url=ZOMBIE_URL))],
+                [InlineKeyboardButton("🧱 Play LUNA BREAKOUT", web_app=WebAppInfo(url=BREAKOUT_URL))]]
         await update.message.reply_text(GAMES_TEXT, parse_mode=ParseMode.MARKDOWN,
             reply_markup=InlineKeyboardMarkup(rows))
         return
