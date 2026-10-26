@@ -640,7 +640,7 @@ TELEGRAM_GAMES = (
     ("LunaWhack", "👽 LUNA WHACK", WHACK_URL),
     ("LunaRider", "🏍 LUNA RIDER", RIDER_URL),
     ("LunaPool", "🎱 LUNA POOL", POOL_URL),
-    ("LunaZombie", "🧟 ZOMBIE DEFENSE", ZOMBIE_URL),
+    ("ZOMBIEDEFENSE", "🧟 ZOMBIE DEFENSE", ZOMBIE_URL),
     ("LunaBreakout", "🧱 LUNA BREAKOUT", BREAKOUT_URL),
 )
 GAME_URL_BY_SHORT_NAME = {short: url for short, _, url in TELEGRAM_GAMES}
@@ -669,7 +669,7 @@ GAME_BOARD_APIS = (
     ("LunaWhack", "👽 *LUNA WHACK*", "https://frg-fight-club.vercel.app/api/luna-games?game=whack"),
     ("LunaRider", "🏍 *LUNA RIDER*", "https://frg-fight-club.vercel.app/api/luna-games?game=rider"),
     ("LunaPool", "🎱 *LUNA POOL*", "https://frg-fight-club.vercel.app/api/luna-games?game=pool"),
-    ("LunaZombie", "🧟 *ZOMBIE DEFENSE*", "https://frg-fight-club.vercel.app/api/luna-games?game=zombie"),
+    ("ZOMBIEDEFENSE", "🧟 *ZOMBIE DEFENSE*", "https://frg-fight-club.vercel.app/api/luna-games?game=zombie"),
     ("LunaBreakout", "🧱 *LUNA BREAKOUT*", "https://frg-fight-club.vercel.app/api/luna-games?game=breakout"),
 )
 
