@@ -687,20 +687,22 @@ def _md_escape(text):
     return re.sub(r"([_*`\[])", r"\\\1", str(text))
 
 async def game_top5_text():
-    lines = ["🏆 *Leaderboards — Top 5*"]
+    # Compact one-line-per-game boards (owner asked for a shorter picker
+    # post Oct 26): title + top 3 on a single line, no blank separators.
+    lines = ["🏆 *Leaderboards — Top 3*"]
     for _short, title, api in GAME_BOARD_APIS:
-        lines.append("")
-        lines.append(title)
         board = await _fetch_board(api)
         if board is None:
-            lines.append("Leaderboard unavailable right now.")
+            lines.append(f"{title} — leaderboard unavailable right now")
             continue
-        rows = (board.get("all") or [])[:5]
+        rows = (board.get("all") or [])[:3]
         if not rows:
-            lines.append("No scores yet — be the first 🏆")
+            lines.append(f"{title} — no scores yet")
         else:
-            for i, row in enumerate(rows, 1):
-                lines.append(f"{i}. {_md_escape(row.get('name', 'Player'))} — {int(row.get('score', 0)):,}")
+            tops = " · ".join(
+                f"{_md_escape(row.get('name', 'Player'))} {int(row.get('score', 0)):,}"
+                for row in rows)
+            lines.append(f"{title} — {tops}")
     return "\n".join(lines)
 
 async def on_games(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
