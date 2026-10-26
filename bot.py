@@ -139,14 +139,14 @@ def parse_summary_args(args, chat_id):
 
 async def send_long(update, text):
     for i in range(0, len(text), 3900):
-        await update.message.reply_text(text[i:i+3900])
+        await update.effective_message.reply_text(text[i:i+3900])
 
 async def on_botstats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Owner-only usage counter (not in the public command list).
     if not OWNER_ID or update.effective_user.id != OWNER_ID:
         return
     u = store.usage_counts()
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         "*Bot usage* (since the last deploy — the log resets on redeploys, 7-day rolling)\n"
         f"Groups I'm in and logging: {u['groups']}\n"
         f"People seen talking in those groups: {u['people_in_groups']}\n"
@@ -166,17 +166,17 @@ async def on_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await _start_quiz(update, ctx, pend)
         return
     if ctx.args and ctx.args[0] == "captcha":
-        await update.message.reply_text("You don't have a pending safety check right now. If you just joined a protected group, tap the button in the group's welcome message to start it.")
+        await update.effective_message.reply_text("You don't have a pending safety check right now. If you just joined a protected group, tap the button in the group's welcome message to start it.")
         return
     lg = user_lang(update)
-    await update.message.reply_text(lang_mod.t("intro", lg), reply_markup=lang_mod.lang_keyboard())
+    await update.effective_message.reply_text(lang_mod.t("intro", lg), reply_markup=lang_mod.lang_keyboard())
 
 async def on_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(HELP, parse_mode=ParseMode.MARKDOWN)
+    await update.effective_message.reply_text(HELP, parse_mode=ParseMode.MARKDOWN)
 
 async def on_language(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lg = user_lang(update)
-    await update.message.reply_text(lang_mod.t("current", lg, name=lang_mod.LABELS[lg]),
+    await update.effective_message.reply_text(lang_mod.t("current", lg, name=lang_mod.LABELS[lg]),
                                     reply_markup=lang_mod.lang_keyboard())
 
 async def on_rank(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -196,7 +196,7 @@ async def on_rank(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     else:
         unlocks = "AI queries unlocked (top daily cap: 6 per day)."
     extra = " (set by the owner)" if override is not None else ""
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         f"🎖 Your rank {scope}: {rank}{extra}\n"
         f"Distinct days active: {days} (rank 1 at {store.RANK_DAYS_1}, rank 2 at {store.RANK_DAYS_2})\n{unlocks}")
 
@@ -226,35 +226,35 @@ def _rankset_target(update, ctx):
 async def on_rankset(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Owner-only, groups only: /rankset <0|1|2> as a reply, or /rankset <user_id> <0|1|2>."""
     if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("🔒 Only the bot owner can set ranks."); return
+        await update.effective_message.reply_text("🔒 Only the bot owner can set ranks."); return
     if update.effective_chat.type == "private":
-        await update.message.reply_text("Run /rankset in the group the rank belongs to."); return
+        await update.effective_message.reply_text("Run /rankset in the group the rank belongs to."); return
     target, rank_s = _rankset_target(update, ctx)
     if target is None or rank_s is None:
-        await update.message.reply_text("Usage: reply to someone's message with /rankset <0|1|2>, or /rankset <user_id> <0|1|2>."); return
+        await update.effective_message.reply_text("Usage: reply to someone's message with /rankset <0|1|2>, or /rankset <user_id> <0|1|2>."); return
     try:
         rank = int(rank_s)
     except (TypeError, ValueError):
-        await update.message.reply_text("Rank must be 0, 1 or 2."); return
+        await update.effective_message.reply_text("Rank must be 0, 1 or 2."); return
     if rank not in (0, 1, 2):
-        await update.message.reply_text("Rank must be 0, 1 or 2."); return
+        await update.effective_message.reply_text("Rank must be 0, 1 or 2."); return
     store.set_rank_override(update.effective_chat.id, target, rank, update.effective_user.id)
-    await update.message.reply_text(f"✅ Rank set to {rank} for user {target} in this chat.")
+    await update.effective_message.reply_text(f"✅ Rank set to {rank} for user {target} in this chat.")
 
 async def on_rankclear(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Owner-only, groups only: drop a manual rank so the earned rank applies again."""
     if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("🔒 Only the bot owner can clear ranks."); return
+        await update.effective_message.reply_text("🔒 Only the bot owner can clear ranks."); return
     if update.effective_chat.type == "private":
-        await update.message.reply_text("Run /rankclear in the group the rank belongs to."); return
+        await update.effective_message.reply_text("Run /rankclear in the group the rank belongs to."); return
     target, _ = _rankset_target(update, ctx)
     if target is None:
-        await update.message.reply_text("Usage: reply to someone's message with /rankclear, or /rankclear <user_id>."); return
+        await update.effective_message.reply_text("Usage: reply to someone's message with /rankclear, or /rankclear <user_id>."); return
     n = store.clear_rank_override(update.effective_chat.id, target)
     if n:
-        await update.message.reply_text(f"✅ Manual rank cleared for user {target} — their earned rank applies again.")
+        await update.effective_message.reply_text(f"✅ Manual rank cleared for user {target} — their earned rank applies again.")
     else:
-        await update.message.reply_text("No manual rank was set for that user — their earned rank already applies.")
+        await update.effective_message.reply_text("No manual rank was set for that user — their earned rank already applies.")
 
 async def on_lang_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -287,17 +287,17 @@ async def ai_guard(update):
     caller's AI ban, then the rank daily caps (2/4/6 by rank).
     False = message already sent."""
     if not AI_ENABLED:
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             "🤖 AI features are temporarily disabled while we review security. "
             "Simple commands still work: /price, /validators, /proposals, /links, /calc, /stake, /safety. /summary and /catchup also work as basic non-AI summaries while AI is off.")
         return False
     if update.effective_chat.type != "private" and not store.ai_enabled(update.effective_chat.id):
-        await update.message.reply_text(GROUP_AI_OFF_NOTE)
+        await update.effective_message.reply_text(GROUP_AI_OFF_NOTE)
         return False
     user_id = update.effective_user.id
     chat = update.effective_chat
     if user_id != OWNER_ID and store.is_ai_banned(user_id):
-        await update.message.reply_text(AI_BANNED_NOTE)
+        await update.effective_message.reply_text(AI_BANNED_NOTE)
         return False
     if chat.type == "private":
         rank = store.rank_anywhere(user_id)
@@ -305,7 +305,7 @@ async def ai_guard(update):
         rank = store.rank_for(chat.id, user_id)
     if ratelimit.allowed_for_rank(user_id, chat.id, OWNER_ID, rank=rank):
         return True
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         "⏳ You've hit your daily AI limit — it resets at midnight UTC. (Ranks allow 2, 4, or 6 AI questions a day; this cap protects the bot's AI quota from spam.)")
     return False
 
@@ -320,14 +320,14 @@ def fallback_text(rows, detailed=False):
 async def on_summary(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     rows, detailed = parse_summary_args(ctx.args, update.effective_chat.id)
     if not rows:
-        await update.message.reply_text("No messages logged yet — I can only summarize messages sent after I joined this group. Give it some activity, then try /summary again.")
+        await update.effective_message.reply_text("No messages logged yet — I can only summarize messages sent after I joined this group. Give it some activity, then try /summary again.")
         return
     if not AI_ENABLED:
         await send_long(update, fallback_text(rows, detailed=detailed))
         store.set_catchup(update.effective_chat.id, update.effective_user.id)
         return
     if not await ai_guard(update): return
-    await update.message.reply_text(f"Summarizing {len(rows)} messages…")
+    await update.effective_message.reply_text(f"Summarizing {len(rows)} messages…")
     out = await ai_client.summarize(rows, detailed=detailed, lang=user_lang(update))
     await send_long(update, out)
     store.set_catchup(update.effective_chat.id, update.effective_user.id)
@@ -337,11 +337,11 @@ async def on_catchup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     last = store.get_catchup_id(cid, uid)
     if last is None:
         rows = store.get_messages(cid, limit=200)
-        await update.message.reply_text("First catchup — here's the last 200, and I'll track from here next time.")
+        await update.effective_message.reply_text("First catchup — here's the last 200, and I'll track from here next time.")
     else:
         rows = store.get_messages(cid, limit=1000, after_id=last)
     if not rows:
-        await update.message.reply_text("You're all caught up — no new messages since your last /catchup.")
+        await update.effective_message.reply_text("You're all caught up — no new messages since your last /catchup.")
         return
     if not AI_ENABLED:
         await send_long(update, f"📬 Catchup — {len(rows)} new messages (basic summary, AI off)\n\n{ai_client.extractive_summary(rows)}")
@@ -355,7 +355,7 @@ async def on_catchup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def on_tldr(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message.reply_to_message
     if not msg or not msg.text:
-        await update.message.reply_text("Reply to a long message with /tldr and I'll shrink it.")
+        await update.effective_message.reply_text("Reply to a long message with /tldr and I'll shrink it.")
         return
     if not await ai_guard(update): return
     out = await ai_client.chat([
@@ -363,12 +363,12 @@ async def on_tldr(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         {"role":"user","content": msg.text}], lang=user_lang(update))
     if not out:
         out = ai_client.DAILY_LIMIT_NOTE if budget.exhausted() else msg.text[:400]
-    await update.message.reply_text(f"⚡ TL;DR: {out}")
+    await update.effective_message.reply_text(f"⚡ TL;DR: {out}")
 
 async def on_ask(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = " ".join(ctx.args).strip()
     if not q:
-        await update.message.reply_text("Ask me something: /ask explain this proposal in simple words")
+        await update.effective_message.reply_text("Ask me something: /ask explain this proposal in simple words")
         return
     if not await ai_guard(update): return
     out = await ai_client.chat([
@@ -412,16 +412,16 @@ async def _can_change(update, ctx):
 
 async def on_burn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     rate = await burn_mod.get_burn_tax_rate()
-    await update.message.reply_text(burn_mod.burn_explainer(rate), parse_mode=ParseMode.MARKDOWN)
+    await update.effective_message.reply_text(burn_mod.burn_explainer(rate), parse_mode=ParseMode.MARKDOWN)
 
 async def on_burnalerts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     cid = update.effective_chat.id
     if ctx.args and ctx.args[0].lower() in ("on", "off"):
         if not await _can_change(update, ctx):
-            await update.message.reply_text("Only group admins can change this group's settings."); return
+            await update.effective_message.reply_text("Only group admins can change this group's settings."); return
         store.set_setting(cid, "burn_alerts", ctx.args[0].lower())
     kb, _ = burn_keyboard(cid)
-    await update.message.reply_text(burn_status_text(cid), reply_markup=kb, parse_mode=ParseMode.MARKDOWN)
+    await update.effective_message.reply_text(burn_status_text(cid), reply_markup=kb, parse_mode=ParseMode.MARKDOWN)
 
 async def on_burn_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -445,22 +445,22 @@ async def price_text():
         return "Couldn't fetch prices right now."
 
 async def on_price2(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(await price_text(), parse_mode=ParseMode.MARKDOWN)
+    await update.effective_message.reply_text(await price_text(), parse_mode=ParseMode.MARKDOWN)
 
 async def on_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    try: await update.message.reply_text(await chain.stats_text(), parse_mode=ParseMode.MARKDOWN)
-    except Exception: await update.message.reply_text("Couldn't fetch chain stats right now.")
+    try: await update.effective_message.reply_text(await chain.stats_text(), parse_mode=ParseMode.MARKDOWN)
+    except Exception: await update.effective_message.reply_text("Couldn't fetch chain stats right now.")
 
 async def on_convert(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
-        await update.message.reply_text("Usage: /convert 1000000  (LUNC amount)  or  /convert 10 usd"); return
+        await update.effective_message.reply_text("Usage: /convert 1000000  (LUNC amount)  or  /convert 10 usd"); return
     try:
         amt = float(ctx.args[0].replace(",", "")); d = await chain.prices(); price = d["terra-luna"]["usd"]
         if len(ctx.args) > 1 and ctx.args[1].lower() == "usd":
-            await update.message.reply_text(f"${amt:,.2f} ≈ {amt/price:,.0f} LUNC (at ${price:.8g}, CoinGecko)")
+            await update.effective_message.reply_text(f"${amt:,.2f} ≈ {amt/price:,.0f} LUNC (at ${price:.8g}, CoinGecko)")
         else:
-            await update.message.reply_text(f"{amt:,.0f} LUNC ≈ ${amt*price:,.2f} (at ${price:.8g}, CoinGecko)")
-    except Exception: await update.message.reply_text("Couldn't convert right now — check the amount format.")
+            await update.effective_message.reply_text(f"{amt:,.0f} LUNC ≈ ${amt*price:,.2f} (at ${price:.8g}, CoinGecko)")
+    except Exception: await update.effective_message.reply_text("Couldn't convert right now — check the amount format.")
 
 async def proposals_text():
     try:
@@ -478,13 +478,13 @@ async def on_proposals(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await send_long(update, await proposals_text())
 
 async def on_wallet(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not ctx.args: await update.message.reply_text("Usage: /wallet terra1..."); return
-    try: await update.message.reply_text(await chain.wallet_text(ctx.args[0]), parse_mode=ParseMode.MARKDOWN)
-    except Exception: await update.message.reply_text("Couldn't fetch that wallet right now.")
+    if not ctx.args: await update.effective_message.reply_text("Usage: /wallet terra1..."); return
+    try: await update.effective_message.reply_text(await chain.wallet_text(ctx.args[0]), parse_mode=ParseMode.MARKDOWN)
+    except Exception: await update.effective_message.reply_text("Couldn't fetch that wallet right now.")
 
 async def on_token(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not ctx.args: await update.message.reply_text("Usage: /token terra1... (CW20 contract)"); return
-    await update.message.reply_text(await chain.token_text(ctx.args[0]), parse_mode=ParseMode.MARKDOWN)
+    if not ctx.args: await update.effective_message.reply_text("Usage: /token terra1... (CW20 contract)"); return
+    await update.effective_message.reply_text(await chain.token_text(ctx.args[0]), parse_mode=ParseMode.MARKDOWN)
 
 async def on_validators(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
@@ -493,16 +493,16 @@ async def on_validators(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         for i, v in enumerate(vals, 1):
             lines.append(f"{i}. {v['description']['moniker']} — {int(v['tokens'])/1e6:,.0f} LUNC, commission {float(v['commission']['commission_rates']['rate'])*100:.1f}%")
         lines.append("\nDetail: /validator <name>   Watch one: /watchvalidator <name>")
-        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
-    except Exception: await update.message.reply_text("Couldn't fetch validators right now.")
+        await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+    except Exception: await update.effective_message.reply_text("Couldn't fetch validators right now.")
 
 async def on_validator_info(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not ctx.args: await update.message.reply_text("Usage: /validator <moniker or terravaloper...>"); return
+    if not ctx.args: await update.effective_message.reply_text("Usage: /validator <moniker or terravaloper...>"); return
     try:
         v = await chain.find_validator(" ".join(ctx.args))
-        if not v: await update.message.reply_text("Validator not found — check the name or use the terravaloper address."); return
-        await update.message.reply_text(chain.validator_text(v), parse_mode=ParseMode.MARKDOWN)
-    except Exception: await update.message.reply_text("Couldn't fetch that validator right now.")
+        if not v: await update.effective_message.reply_text("Validator not found — check the name or use the terravaloper address."); return
+        await update.effective_message.reply_text(chain.validator_text(v), parse_mode=ParseMode.MARKDOWN)
+    except Exception: await update.effective_message.reply_text("Couldn't fetch that validator right now.")
 
 STAKE_TEXT = """🥩 *How LUNC staking works*
 1. Hold LUNC in a wallet you control (Galaxy Station, Keplr, Leap).
@@ -514,10 +514,10 @@ STAKE_TEXT = """🥩 *How LUNC staking works*
 Risks: validator downtime/slashing can cost a small %; price can move while unbonding. This is info, not financial advice."""
 
 async def on_stake(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(STAKE_TEXT, parse_mode=ParseMode.MARKDOWN)
+    await update.effective_message.reply_text(STAKE_TEXT, parse_mode=ParseMode.MARKDOWN)
 
 async def on_calc(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not ctx.args: await update.message.reply_text("Usage: /calc 1000000 — reward estimate for staking that many LUNC for 1 year"); return
+    if not ctx.args: await update.effective_message.reply_text("Usage: /calc 1000000 — reward estimate for staking that many LUNC for 1 year"); return
     try:
         amt = float(ctx.args[0].replace(",", ""))
         # Estimate only: bonded ratio method is complex on-chain; use a clearly-labelled range via supply inflation proxy is unreliable,
@@ -526,8 +526,8 @@ async def on_calc(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         for apr in (5, 10, 15, 20):
             lines.append(f"• At {apr}% APR: ~{amt*apr/100:,.0f} LUNC")
         lines.append("Actual APR moves with staking ratio, tax, and commission — check your wallet app for the live rate before staking.")
-        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
-    except Exception: await update.message.reply_text("Check the amount — example: /calc 1000000")
+        await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+    except Exception: await update.effective_message.reply_text("Check the amount — example: /calc 1000000")
 
 LINKS_TEXT = """🔗 *Official links only*
 Terra Classic: https://terra-classic.io (community)
@@ -573,10 +573,10 @@ Charts for Classic pairs: Coinhall https://coinhall.org · Vyntrex https://vyntr
 ⚠️ Open a DEX from your own bookmark only — fake DEX sites are a common drain. Check a pair's contract address on Finder before you swap."""
 
 async def on_links(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(LINKS_TEXT, parse_mode=ParseMode.MARKDOWN)
+    await update.effective_message.reply_text(LINKS_TEXT, parse_mode=ParseMode.MARKDOWN)
 
 async def on_dex(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(DEX_TEXT, parse_mode=ParseMode.MARKDOWN)
+    await update.effective_message.reply_text(DEX_TEXT, parse_mode=ParseMode.MARKDOWN)
 
 GAMES_TEXT = (
     "🎮 *Luna Classic games*\n\n"
@@ -626,8 +626,8 @@ TELEGRAM_GAMES = (
     ("neonrush", "🏎 Play NEON RUSH", NEON_RUSH_URL),
     ("solitaire", "🃏 Play SOLITAIRE", SOLITAIRE_URL),
     ("hoops", "🏀 Play HOOPS", HOOPS_URL),
-    ("penalty", "⚽ Play PENALTY KICK", PENALTY_URL),
-    ("darts", "🎯 Play DARTS", DARTS_URL),
+    ("Penalty", "⚽ Play PENALTY KICK", PENALTY_URL),
+    ("Darts", "🎯 Play DARTS", DARTS_URL),
     ("LunaBlocks", "🧩 Play LUNA BLOCKS", BLOCKS_URL),
     ("Lunagolf", "⛳ Play LUNA GOLF", GOLF_URL),
     ("LunaDefender", "🚀 Play LUNA DEFENDER", DEFENDER_URL),
@@ -655,8 +655,8 @@ GAME_BOARD_APIS = (
     ("neonrush", "🏎 *NEON RUSH*", "https://frg-fight-club.vercel.app/api/neon-rush-board"),
     ("solitaire", "🃏 *SOLITAIRE*", "https://frg-fight-club.vercel.app/api/solitaire-board"),
     ("hoops", "🏀 *HOOPS*", "https://frg-fight-club.vercel.app/api/hoops-board"),
-    ("penalty", "⚽ *PENALTY KICK*", "https://frg-fight-club.vercel.app/api/luna-games?game=penalty"),
-    ("darts", "🎯 *DARTS*", "https://frg-fight-club.vercel.app/api/luna-games?game=darts"),
+    ("Penalty", "⚽ *PENALTY KICK*", "https://frg-fight-club.vercel.app/api/luna-games?game=penalty"),
+    ("Darts", "🎯 *DARTS*", "https://frg-fight-club.vercel.app/api/luna-games?game=darts"),
     ("LunaBlocks", "🧩 *LUNA BLOCKS*", "https://frg-fight-club.vercel.app/api/luna-games?game=blocks"),
     ("Lunagolf", "⛳ *LUNA GOLF*", "https://frg-fight-club.vercel.app/api/luna-games?game=golf"),
     ("LunaDefender", "🚀 *LUNA DEFENDER*", "https://frg-fight-club.vercel.app/api/luna-games?game=defender"),
@@ -725,7 +725,7 @@ async def on_games(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🎱 Play LUNA POOL", web_app=WebAppInfo(url=POOL_URL))],
                 [InlineKeyboardButton("🧟 Play ZOMBIE DEFENSE", web_app=WebAppInfo(url=ZOMBIE_URL))],
                 [InlineKeyboardButton("🧱 Play LUNA BREAKOUT", web_app=WebAppInfo(url=BREAKOUT_URL))]]
-        await update.message.reply_text(GAMES_TEXT, parse_mode=ParseMode.MARKDOWN,
+        await update.effective_message.reply_text(GAMES_TEXT, parse_mode=ParseMode.MARKDOWN,
             reply_markup=InlineKeyboardMarkup(rows))
         return
 
@@ -735,7 +735,7 @@ async def on_games(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     rows = [[InlineKeyboardButton(label, callback_data=f"pick:{short_name}")]
             for short_name, label, _url in TELEGRAM_GAMES]
     text = "🎮 *Luna Classic games*\n\n" + await game_top5_text() + "\n\n👇 *Pick a game* — tap one and only that game posts."
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN,
+    await update.effective_message.reply_text(text, parse_mode=ParseMode.MARKDOWN,
         reply_markup=InlineKeyboardMarkup(rows))
 
 async def on_pick_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -744,13 +744,16 @@ async def on_pick_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if q is None or not q.data:
         return
     short_name = q.data.split(":", 1)[1] if ":" in q.data else ""
-    entry = {s.lower(): (label, url) for s, label, url in TELEGRAM_GAMES}.get(short_name.lower())
+    # Incoming callback data is matched case-insensitively, but send_game
+    # must get the short name exactly as registered in BotFather (Telegram
+    # treats game short names as case-sensitive), so the entry carries the
+    # canonical TELEGRAM_GAMES spelling through.
+    entry = {s.lower(): (s, label, url) for s, label, url in TELEGRAM_GAMES}.get(short_name.lower())
     if not entry:
         print(f"pick callback with unknown game: data={q.data!r}")
         await q.answer(text="That game isn't available.", show_alert=True)
         return
-    short_name = short_name.lower()
-    label, url = entry
+    short_name, label, url = entry
     chat_id = q.message.chat.id if q.message is not None and q.message.chat is not None else None
     # Forum groups: the picker lives in a topic — carry its thread id through
     # so the game card posts in the SAME topic, not the group's General area.
@@ -792,7 +795,7 @@ async def on_inline_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await iq.answer(results, cache_time=30, is_personal=False)
 
 async def on_safety(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(SAFETY_TEXT, parse_mode=ParseMode.MARKDOWN)
+    await update.effective_message.reply_text(SAFETY_TEXT, parse_mode=ParseMode.MARKDOWN)
 
 PRIVACY_TEXT = (
     "🔒 *Privacy & security — what this bot does*\n\n"
@@ -805,16 +808,16 @@ PRIVACY_TEXT = (
     "• *Don't take our word for it:* the bot's code is public — read exactly what it does: github.com/lunc-projects/lunc-assistant-bot")
 
 async def on_privacy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(PRIVACY_TEXT, parse_mode=ParseMode.MARKDOWN)
+    await update.effective_message.reply_text(PRIVACY_TEXT, parse_mode=ParseMode.MARKDOWN)
 
 async def _ai_toggle(update: Update, ctx: ContextTypes.DEFAULT_TYPE, on: bool):
     chat = update.effective_chat
     if chat.type == "private":
-        await update.message.reply_text("This switch is for groups — in DM, your AI access follows your rank and the daily limits."); return
+        await update.effective_message.reply_text("This switch is for groups — in DM, your AI access follows your rank and the daily limits."); return
     if not await _can_change(update, ctx):
-        await update.message.reply_text("Only group admins can change this group's AI setting."); return
+        await update.effective_message.reply_text("Only group admins can change this group's AI setting."); return
     store.set_ai_enabled(chat.id, on)
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         "🤖 AI is ON for this group (rank gates and daily limits still apply)." if on
         else "🔒 AI is OFF for this group — no AI calls will be made here. Simple commands still work. An admin can turn it back on with /aion.")
 
@@ -896,18 +899,18 @@ async def _can_moderate(update, ctx):
 async def _owner_only(update):
     if _is_owner(update.effective_user.id):
         return True
-    await update.message.reply_text("Owner only.")
+    await update.effective_message.reply_text("Owner only.")
     return False
 
 async def on_protect(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat.type not in ("group", "supergroup"):
-        await update.message.reply_text("Run /protect inside the group you want protected."); return
+        await update.effective_message.reply_text("Run /protect inside the group you want protected."); return
     if not await _can_change(update, ctx):
-        await update.message.reply_text("Only group admins can request protection."); return
+        await update.effective_message.reply_text("Only group admins can request protection."); return
     row = store.mod_group(chat.id)
     if row is not None and row["approved"]:
-        await update.message.reply_text("🛡 This group is already protected."); return
+        await update.effective_message.reply_text("🛡 This group is already protected."); return
     store.mod_request_group(chat.id, chat.title or "", update.effective_user.id)
     missing = []
     try:
@@ -920,7 +923,7 @@ async def on_protect(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception:
         missing.append("(couldn't verify the bot's admin rights)")
     note = ("\n⚠️ Still needed for the gate to work: " + ", ".join(missing) + ".") if missing else ""
-    await update.message.reply_text("🛡 Protection requested — the bot owner has been notified for approval." + note)
+    await update.effective_message.reply_text("🛡 Protection requested — the bot owner has been notified for approval." + note)
     if OWNER_ID:
         kb = InlineKeyboardMarkup([[
             InlineKeyboardButton("✅ Approve", callback_data=f"mod:approve:{chat.id}"),
@@ -933,13 +936,13 @@ async def on_protect(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def on_unprotect(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat.type not in ("group", "supergroup"):
-        await update.message.reply_text("Run /unprotect inside the group."); return
+        await update.effective_message.reply_text("Run /unprotect inside the group."); return
     if not (_is_owner(update.effective_user.id) or await _can_change(update, ctx)):
-        await update.message.reply_text("Only group admins (or the owner) can remove protection."); return
+        await update.effective_message.reply_text("Only group admins (or the owner) can remove protection."); return
     if store.mod_remove_group(chat.id):
-        await update.message.reply_text("Protection removed — this group is no longer in the network.")
+        await update.effective_message.reply_text("Protection removed — this group is no longer in the network.")
     else:
-        await update.message.reply_text("This group wasn't registered.")
+        await update.effective_message.reply_text("This group wasn't registered.")
 
 async def on_approve(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _owner_only(update): return
@@ -948,41 +951,41 @@ async def on_approve(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if len(pend) == 1:
             chat_id = pend[0]["chat_id"]
         elif not pend:
-            await update.message.reply_text("No groups are waiting for approval."); return
+            await update.effective_message.reply_text("No groups are waiting for approval."); return
         else:
-            await update.message.reply_text("More than one group is waiting — see them with /groups, then /approve <chat_id>."); return
+            await update.effective_message.reply_text("More than one group is waiting — see them with /groups, then /approve <chat_id>."); return
     else:
         try: chat_id = int(ctx.args[0])
         except ValueError:
-            await update.message.reply_text("Chat id must be a number."); return
+            await update.effective_message.reply_text("Chat id must be a number."); return
     if store.mod_approve_group(chat_id):
-        await update.message.reply_text(f"✅ Group {chat_id} approved — protection is ON.")
+        await update.effective_message.reply_text(f"✅ Group {chat_id} approved — protection is ON.")
         try: await ctx.bot.send_message(chat_id, "🛡 Protection is ON for this group: new joiners pass a short safety check before they can post, known scammers are removed automatically, and a first message containing a link gets the sender removed.")
         except Exception: pass
     else:
-        await update.message.reply_text("No pending or registered group with that id.")
+        await update.effective_message.reply_text("No pending or registered group with that id.")
 
 async def on_deny(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _owner_only(update): return
     if not ctx.args:
-        await update.message.reply_text("Usage: /deny <chat_id>"); return
+        await update.effective_message.reply_text("Usage: /deny <chat_id>"); return
     try: chat_id = int(ctx.args[0])
     except ValueError:
-        await update.message.reply_text("Chat id must be a number."); return
+        await update.effective_message.reply_text("Chat id must be a number."); return
     if store.mod_remove_group(chat_id):
-        await update.message.reply_text(f"Group {chat_id} removed from the list.")
+        await update.effective_message.reply_text(f"Group {chat_id} removed from the list.")
     else:
-        await update.message.reply_text("No group with that id.")
+        await update.effective_message.reply_text("No group with that id.")
 
 async def on_groups(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _owner_only(update): return
     rows = store.mod_groups(approved_only=False)
     if not rows:
-        await update.message.reply_text("No groups registered or pending."); return
+        await update.effective_message.reply_text("No groups registered or pending."); return
     lines = ["*Protection network*"]
     for r in rows:
         lines.append(f"{'🛡' if r['approved'] else '⏳ pending'} {r['title'] or '(no title)'} — chat id {r['chat_id']}")
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+    await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
 async def _apply_gban(ctx, target_id, ban):
     ok = fail = 0
@@ -1026,30 +1029,30 @@ async def _owner_mod_alert(ctx, text, undo_user_id=None):
 
 async def on_gban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _can_moderate(update, ctx):
-        await update.message.reply_text("Only the owner, elevated users, or admins of a protected group can do this."); return
+        await update.effective_message.reply_text("Only the owner, elevated users, or admins of a protected group can do this."); return
     actor = update.effective_user.id
     target, reason = _mod_target(update, ctx)
     if not target:
-        await update.message.reply_text("Usage: reply to the scammer's message with /gban [reason], or /gban <user_id> [reason]."); return
+        await update.effective_message.reply_text("Usage: reply to the scammer's message with /gban [reason], or /gban <user_id> [reason]."); return
     if _is_owner(target):
-        await update.message.reply_text("That user can't be banned."); return
+        await update.effective_message.reply_text("That user can't be banned."); return
     if target == actor:
-        await update.message.reply_text("You can't ban yourself."); return
+        await update.effective_message.reply_text("You can't ban yourself."); return
     if not _is_owner(actor):
         # Anti-abuse rails (2026-10-25): moderators can't ban up the
         # chain, and nobody gets to mass-ban — the owner is alerted
         # with an undo button for every one of these (below).
         if store.is_elevated(target):
-            await update.message.reply_text("🚫 Only the owner can globally ban an elevated user."); return
+            await update.effective_message.reply_text("🚫 Only the owner can globally ban an elevated user."); return
         for g in store.mod_groups():
             if await _is_group_admin(ctx, g["chat_id"], target):
-                await update.message.reply_text("🚫 That user is an admin in a protected group — only the owner can globally ban them."); return
+                await update.effective_message.reply_text("🚫 That user is an admin in a protected group — only the owner can globally ban them."); return
         if store.mod_action_count(actor, "gban", _utc_day_start()) >= GBAN_DAILY_LIMIT_NONOWNER:
-            await update.message.reply_text(f"🚫 You've hit today's limit of {GBAN_DAILY_LIMIT_NONOWNER} global bans for non-owner moderators — it resets at midnight UTC. The owner has no limit."); return
+            await update.effective_message.reply_text(f"🚫 You've hit today's limit of {GBAN_DAILY_LIMIT_NONOWNER} global bans for non-owner moderators — it resets at midnight UTC. The owner has no limit."); return
     store.gban_add(target, reason, actor)
     store.mod_log_add(actor, "gban", target, update.effective_chat.id, reason)
     ok, fail = await _apply_gban(ctx, target, True)
-    await update.message.reply_text(f"🚫 User {target} is now globally banned — removed from {ok} protected group(s)" + (f" ({fail} failed — the bot may lack admin rights there)" if fail else "") + ".")
+    await update.effective_message.reply_text(f"🚫 User {target} is now globally banned — removed from {ok} protected group(s)" + (f" ({fail} failed — the bot may lack admin rights there)" if fail else "") + ".")
     if not _is_owner(actor):
         await _owner_mod_alert(ctx,
             f"🚫 Global ban by moderator {actor}\nUser: {target}\nReason: {reason or '(none given)'}\nFrom chat: {update.effective_chat.id}\nRemoved from {ok} group(s)" + (f" ({fail} failed)" if fail else "") + "\nWrong call? Undo it:",
@@ -1057,99 +1060,99 @@ async def on_gban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def on_gunban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _can_moderate(update, ctx):
-        await update.message.reply_text("Only the owner, elevated users, or admins of a protected group can do this."); return
+        await update.effective_message.reply_text("Only the owner, elevated users, or admins of a protected group can do this."); return
     actor = update.effective_user.id
     if not ctx.args:
-        await update.message.reply_text("Usage: /gunban <user_id>"); return
+        await update.effective_message.reply_text("Usage: /gunban <user_id>"); return
     try: target = int(ctx.args[0])
     except ValueError:
-        await update.message.reply_text("User id must be a number."); return
+        await update.effective_message.reply_text("User id must be a number."); return
     row = store.gban_get(target)
     if row is None:
-        await update.message.reply_text("That user isn't on the global ban list."); return
+        await update.effective_message.reply_text("That user isn't on the global ban list."); return
     if not _is_owner(actor) and row["banned_by"] == OWNER_ID:
-        await update.message.reply_text("🚫 Only the owner can lift a global ban the owner placed."); return
+        await update.effective_message.reply_text("🚫 Only the owner can lift a global ban the owner placed."); return
     store.gban_remove(target)
     store.mod_log_add(actor, "gunban", target, update.effective_chat.id, "")
     ok, fail = await _apply_gban(ctx, target, False)
-    await update.message.reply_text(f"✅ User {target} removed from the global ban list and unbanned in {ok} group(s)" + (f" ({fail} failed)" if fail else "") + ".")
+    await update.effective_message.reply_text(f"✅ User {target} removed from the global ban list and unbanned in {ok} group(s)" + (f" ({fail} failed)" if fail else "") + ".")
     if not _is_owner(actor):
         await _owner_mod_alert(ctx, f"✅ Global ban LIFTED by moderator {actor}\nUser: {target}\nUnbanned in {ok} group(s)" + (f" ({fail} failed)" if fail else "") + ".")
 
 async def on_gbans(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _can_moderate(update, ctx):
-        await update.message.reply_text("Only the owner, elevated users, or admins of a protected group can see this."); return
+        await update.effective_message.reply_text("Only the owner, elevated users, or admins of a protected group can see this."); return
     rows = store.gban_all()
     if not rows:
-        await update.message.reply_text("The global ban list is empty."); return
+        await update.effective_message.reply_text("The global ban list is empty."); return
     lines = [f"*Global ban list ({len(rows)})*"]
     for r in rows[:30]:
         lines.append(f"• {r['user_id']}" + (f" — {r['reason']}" if r["reason"] else "") + f" (by {r['banned_by']})")
     if len(rows) > 30: lines.append(f"…and {len(rows) - 30} more")
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+    await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
 async def on_aiban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """AI ban: blocks ALL AI features for one user (every chat + DM).
     They keep chatting and keep every simple command — only the token-
     spending features stop. The light-touch answer to AI abuse."""
     if not await _can_moderate(update, ctx):
-        await update.message.reply_text("Only the owner, elevated users, or admins of a protected group can do this."); return
+        await update.effective_message.reply_text("Only the owner, elevated users, or admins of a protected group can do this."); return
     actor = update.effective_user.id
     target, reason = _mod_target(update, ctx)
     if not target:
-        await update.message.reply_text("Usage: reply to their message with /aiban [reason], or /aiban <user_id> [reason]."); return
+        await update.effective_message.reply_text("Usage: reply to their message with /aiban [reason], or /aiban <user_id> [reason]."); return
     if _is_owner(target):
-        await update.message.reply_text("That user can't be AI-banned."); return
+        await update.effective_message.reply_text("That user can't be AI-banned."); return
     if target == actor:
-        await update.message.reply_text("You can't AI-ban yourself."); return
+        await update.effective_message.reply_text("You can't AI-ban yourself."); return
     if not _is_owner(actor) and store.is_elevated(target):
-        await update.message.reply_text("🚫 Only the owner can AI-ban an elevated user."); return
+        await update.effective_message.reply_text("🚫 Only the owner can AI-ban an elevated user."); return
     store.ai_ban_add(target, reason, actor)
     store.mod_log_add(actor, "aiban", target, update.effective_chat.id, reason)
-    await update.message.reply_text(f"🤖🚫 User {target} is AI-banned — no /ask, summaries, or AI answers for them anywhere. Simple commands still work. Lift it with /aiunban {target}.")
+    await update.effective_message.reply_text(f"🤖🚫 User {target} is AI-banned — no /ask, summaries, or AI answers for them anywhere. Simple commands still work. Lift it with /aiunban {target}.")
     if not _is_owner(actor):
         await _owner_mod_alert(ctx, f"🤖🚫 AI ban by moderator {actor}\nUser: {target}\nReason: {reason or '(none given)'}\nFrom chat: {update.effective_chat.id}\nLift it any time with /aiunban {target}.")
 
 async def on_aiunban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _can_moderate(update, ctx):
-        await update.message.reply_text("Only the owner, elevated users, or admins of a protected group can do this."); return
+        await update.effective_message.reply_text("Only the owner, elevated users, or admins of a protected group can do this."); return
     actor = update.effective_user.id
     if not ctx.args:
-        await update.message.reply_text("Usage: /aiunban <user_id>"); return
+        await update.effective_message.reply_text("Usage: /aiunban <user_id>"); return
     try: target = int(ctx.args[0])
     except ValueError:
-        await update.message.reply_text("User id must be a number."); return
+        await update.effective_message.reply_text("User id must be a number."); return
     row = store.ai_ban_get(target)
     if row is None:
-        await update.message.reply_text("That user isn't AI-banned."); return
+        await update.effective_message.reply_text("That user isn't AI-banned."); return
     if not _is_owner(actor) and row["banned_by"] == OWNER_ID:
-        await update.message.reply_text("🚫 Only the owner can lift an AI ban the owner placed."); return
+        await update.effective_message.reply_text("🚫 Only the owner can lift an AI ban the owner placed."); return
     store.ai_ban_remove(target)
     store.mod_log_add(actor, "aiunban", target, update.effective_chat.id, "")
-    await update.message.reply_text(f"✅ AI ban lifted for user {target} — AI features work for them again (rank caps still apply).")
+    await update.effective_message.reply_text(f"✅ AI ban lifted for user {target} — AI features work for them again (rank caps still apply).")
 
 async def on_aibans(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _can_moderate(update, ctx):
-        await update.message.reply_text("Only the owner, elevated users, or admins of a protected group can see this."); return
+        await update.effective_message.reply_text("Only the owner, elevated users, or admins of a protected group can see this."); return
     rows = store.ai_ban_all()
     if not rows:
-        await update.message.reply_text("No AI bans right now."); return
+        await update.effective_message.reply_text("No AI bans right now."); return
     lines = [f"*AI ban list ({len(rows)})*"]
     for r in rows[:30]:
         lines.append(f"• {r['user_id']}" + (f" — {r['reason']}" if r["reason"] else "") + f" (by {r['banned_by']})")
     if len(rows) > 30: lines.append(f"…and {len(rows) - 30} more")
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+    await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
 async def on_modlog(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _owner_only(update): return
     rows = store.mod_log_recent(15)
     if not rows:
-        await update.message.reply_text("The moderation log is empty."); return
+        await update.effective_message.reply_text("The moderation log is empty."); return
     lines = ["*Moderation log — latest first*"]
     for r in rows:
         when = datetime.datetime.fromtimestamp(r["ts"], datetime.timezone.utc).strftime("%b %d %H:%M UTC")
         lines.append(f"• {when} — {r['action']}" + (f": user {r['target']}" if r["target"] else "") + f" by {r['actor'] or 'auto'}" + (f" — {r['detail']}" if r["detail"] else ""))
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+    await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
 async def on_modundo_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -1186,19 +1189,19 @@ async def on_appeal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     the ban record plus one-tap lift buttons."""
     chat, user = update.effective_chat, update.effective_user
     if chat.type != "private":
-        await update.message.reply_text("Appeals are private — DM me and send /appeal there."); return
+        await update.effective_message.reply_text("Appeals are private — DM me and send /appeal there."); return
     g = store.gban_get(user.id)
     a = store.ai_ban_get(user.id)
     if not g and not a:
-        await update.message.reply_text("You have no ban on record with me — nothing to appeal. (This covers only this bot's global ban list and AI ban list.)"); return
+        await update.effective_message.reply_text("You have no ban on record with me — nothing to appeal. (This covers only this bot's global ban list and AI ban list.)"); return
     last = store.appeal_last(user.id)
     if last and int(time.time()) - last["ts"] < 86400:
-        await update.message.reply_text("You've already appealed in the last 24 hours — the owner has it. One appeal a day keeps it readable."); return
+        await update.effective_message.reply_text("You've already appealed in the last 24 hours — the owner has it. One appeal a day keeps it readable."); return
     text = " ".join(ctx.args or []).strip()
     kinds = ("global ban" if g else "") + (" + " if g and a else "") + ("AI ban" if a else "")
     store.appeal_record(user.id, kinds)
     store.mod_log_add(user.id, "appeal", user.id, None, kinds)
-    await update.message.reply_text("✅ Appeal sent to the owner, with the ban record attached. If they lift it, you'll see the bot working for you again — no need to send more.")
+    await update.effective_message.reply_text("✅ Appeal sent to the owner, with the ban record attached. If they lift it, you'll see the bot working for you again — no need to send more.")
     if OWNER_ID:
         rows = []
         detail = []
@@ -1219,32 +1222,32 @@ async def on_elevate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif ctx.args:
         try: target = int(ctx.args[0])
         except ValueError:
-            await update.message.reply_text("User id must be a number."); return
+            await update.effective_message.reply_text("User id must be a number."); return
     if not target:
-        await update.message.reply_text("Usage: reply to the person's message with /elevate, or /elevate <user_id>."); return
+        await update.effective_message.reply_text("Usage: reply to the person's message with /elevate, or /elevate <user_id>."); return
     store.elevated_add(target, update.effective_user.id)
     store.mod_log_add(update.effective_user.id, "elevate", target, update.effective_chat.id, "")
-    await update.message.reply_text(f"✅ User {target} is now an elevated user (can /gban and /gunban across every protected group).")
+    await update.effective_message.reply_text(f"✅ User {target} is now an elevated user (can /gban and /gunban across every protected group).")
 
 async def on_unelevate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _owner_only(update): return
     if not ctx.args:
-        await update.message.reply_text("Usage: /unelevate <user_id>"); return
+        await update.effective_message.reply_text("Usage: /unelevate <user_id>"); return
     try: target = int(ctx.args[0])
     except ValueError:
-        await update.message.reply_text("User id must be a number."); return
+        await update.effective_message.reply_text("User id must be a number."); return
     if store.elevated_remove(target):
         store.mod_log_add(update.effective_user.id, "unelevate", target, update.effective_chat.id, "")
-        await update.message.reply_text(f"User {target} is no longer elevated.")
+        await update.effective_message.reply_text(f"User {target} is no longer elevated.")
     else:
-        await update.message.reply_text("That user wasn't elevated.")
+        await update.effective_message.reply_text("That user wasn't elevated.")
 
 async def on_elevated(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _owner_only(update): return
     rows = store.elevated_all()
     if not rows:
-        await update.message.reply_text("No elevated users yet. Add one with /elevate <user_id>."); return
-    await update.message.reply_text("Elevated users: " + ", ".join(str(r["user_id"]) for r in rows))
+        await update.effective_message.reply_text("No elevated users yet. Add one with /elevate <user_id>."); return
+    await update.effective_message.reply_text("Elevated users: " + ", ".join(str(r["user_id"]) for r in rows))
 
 async def on_new_members(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
@@ -1321,8 +1324,8 @@ async def _start_quiz(update, ctx, pend):
     QUIZ[update.effective_user.id] = sess
     g = store.mod_group(pend["chat_id"])
     title = g["title"] if g else "the group"
-    await update.message.reply_text(f"🛡 Quick check for *{title}* — {len(sess['items'])} simple taps to prove you're a real person. Get them all right to unlock chatting.", parse_mode=ParseMode.MARKDOWN)
-    await _quiz_send(update.message.reply_text, sess)
+    await update.effective_message.reply_text(f"🛡 Quick check for *{title}* — {len(sess['items'])} simple taps to prove you're a real person. Get them all right to unlock chatting.", parse_mode=ParseMode.MARKDOWN)
+    await _quiz_send(update.effective_message.reply_text, sess)
 
 async def _quiz_send(reply_fn, sess):
     item = sess["items"][sess["idx"]]
@@ -1425,14 +1428,14 @@ async def job_fresh_sweep(ctx: ContextTypes.DEFAULT_TYPE):
 async def on_mute(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat.type not in ("group", "supergroup"):
-        await update.message.reply_text("Use /mute in a group."); return
+        await update.effective_message.reply_text("Use /mute in a group."); return
     if not await _can_moderate(update, ctx):
-        await update.message.reply_text("Only the owner, elevated users, or admins of a protected group can do this."); return
+        await update.effective_message.reply_text("Only the owner, elevated users, or admins of a protected group can do this."); return
     target, rest = _mod_target(update, ctx)
     if not target:
-        await update.message.reply_text("Usage: reply to their message with /mute [minutes], or /mute <user_id> [minutes]. Default is 60 minutes."); return
+        await update.effective_message.reply_text("Usage: reply to their message with /mute [minutes], or /mute <user_id> [minutes]. Default is 60 minutes."); return
     if _is_owner(target):
-        await update.message.reply_text("That user can't be muted."); return
+        await update.effective_message.reply_text("That user can't be muted."); return
     minutes = 60
     for tok in rest.split():
         try: minutes = int(tok); break
@@ -1441,78 +1444,78 @@ async def on_mute(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     until = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=minutes)
     try:
         await ctx.bot.restrict_chat_member(chat.id, target, permissions=NO_PERMS, until_date=until)
-        await update.message.reply_text(f"🔇 User {target} is muted for {minutes} minute(s).")
+        await update.effective_message.reply_text(f"🔇 User {target} is muted for {minutes} minute(s).")
     except Exception:
-        await update.message.reply_text("Couldn't mute them — the bot may lack admin rights here, or they're an admin.")
+        await update.effective_message.reply_text("Couldn't mute them — the bot may lack admin rights here, or they're an admin.")
 
 async def on_unmute(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat.type not in ("group", "supergroup"):
-        await update.message.reply_text("Use /unmute in a group."); return
+        await update.effective_message.reply_text("Use /unmute in a group."); return
     if not await _can_moderate(update, ctx):
-        await update.message.reply_text("Only the owner, elevated users, or admins of a protected group can do this."); return
+        await update.effective_message.reply_text("Only the owner, elevated users, or admins of a protected group can do this."); return
     target, _ = _mod_target(update, ctx)
     if not target:
-        await update.message.reply_text("Usage: reply to their message with /unmute, or /unmute <user_id>."); return
+        await update.effective_message.reply_text("Usage: reply to their message with /unmute, or /unmute <user_id>."); return
     try:
         await ctx.bot.restrict_chat_member(chat.id, target, permissions=FULL_PERMS)
-        await update.message.reply_text(f"🔊 User {target} can chat again.")
+        await update.effective_message.reply_text(f"🔊 User {target} can chat again.")
     except Exception:
-        await update.message.reply_text("Couldn't unmute them — the bot may lack admin rights here.")
+        await update.effective_message.reply_text("Couldn't unmute them — the bot may lack admin rights here.")
 
 async def on_blacklist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if not (_is_owner(uid) or store.is_elevated(uid)):
-        await update.message.reply_text("Only the owner and elevated users manage the word blacklist."); return
+        await update.effective_message.reply_text("Only the owner and elevated users manage the word blacklist."); return
     args = ctx.args or []
     if len(args) >= 2 and args[0].lower() == "add":
         word = args[1].lower().strip()
         if len(word) < 3:
-            await update.message.reply_text("Blacklist words need at least 3 characters."); return
+            await update.effective_message.reply_text("Blacklist words need at least 3 characters."); return
         store.blacklist_add(word, uid)
         store.mod_log_add(uid, "blacklist add", None, update.effective_chat.id, word)
-        await update.message.reply_text(f"✅ '{word}' is on the blacklist — in protected groups, a message containing it is deleted and the sender removed."); return
+        await update.effective_message.reply_text(f"✅ '{word}' is on the blacklist — in protected groups, a message containing it is deleted and the sender removed."); return
     if len(args) >= 2 and args[0].lower() == "remove":
         if store.blacklist_remove(args[1].lower()):
             store.mod_log_add(uid, "blacklist remove", None, update.effective_chat.id, args[1].lower())
-            await update.message.reply_text("Removed from the blacklist.")
+            await update.effective_message.reply_text("Removed from the blacklist.")
         else:
-            await update.message.reply_text("That word wasn't on the blacklist.")
+            await update.effective_message.reply_text("That word wasn't on the blacklist.")
         return
     words = store.blacklist_all()
-    await update.message.reply_text("Word blacklist: " + (", ".join(words) if words else "(empty)") + "\nAdd: /blacklist add <word> · Remove: /blacklist remove <word>")
+    await update.effective_message.reply_text("Word blacklist: " + (", ".join(words) if words else "(empty)") + "\nAdd: /blacklist add <word> · Remove: /blacklist remove <word>")
 
 async def on_raid(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat.type not in ("group", "supergroup"):
-        await update.message.reply_text("Use /raid in a group."); return
+        await update.effective_message.reply_text("Use /raid in a group."); return
     if not await _can_moderate(update, ctx):
-        await update.message.reply_text("Only the owner, elevated users, or admins of a protected group can do this."); return
+        await update.effective_message.reply_text("Only the owner, elevated users, or admins of a protected group can do this."); return
     arg = (ctx.args or [""])[0].lower()
     if arg == "on":
         RAID_UNTIL[chat.id] = int(time.time()) + RAID_MINUTES * 60
-        await update.message.reply_text(f"🚨 Anti-raid lockdown ON for {RAID_MINUTES} minutes — new joiners are removed on sight.")
+        await update.effective_message.reply_text(f"🚨 Anti-raid lockdown ON for {RAID_MINUTES} minutes — new joiners are removed on sight.")
     elif arg == "off":
         RAID_UNTIL.pop(chat.id, None)
-        await update.message.reply_text("Anti-raid lockdown lifted.")
+        await update.effective_message.reply_text("Anti-raid lockdown lifted.")
     else:
         active = RAID_UNTIL.get(chat.id, 0) > int(time.time())
-        await update.message.reply_text(("🚨 Anti-raid lockdown is ON right now." if active else "Anti-raid lockdown is off (it turns on automatically during a join surge).") + " Usage: /raid on · /raid off")
+        await update.effective_message.reply_text(("🚨 Anti-raid lockdown is ON right now." if active else "Anti-raid lockdown is off (it turns on automatically during a join surge).") + " Usage: /raid on · /raid off")
 
 async def on_scamalerts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat.type not in ("group", "supergroup"):
-        await update.message.reply_text("Use /scamalerts in a group."); return
+        await update.effective_message.reply_text("Use /scamalerts in a group."); return
     if not store.mod_is_protected(chat.id):
-        await update.message.reply_text("This group isn't protected yet — an admin can request it with /protect."); return
+        await update.effective_message.reply_text("This group isn't protected yet — an admin can request it with /protect."); return
     if not await _can_change(update, ctx):
-        await update.message.reply_text("Only group admins can change this."); return
+        await update.effective_message.reply_text("Only group admins can change this."); return
     arg = (ctx.args or [""])[0].lower()
     if arg in ("on", "off"):
         store.set_scam_alerts(chat.id, arg == "on")
-        await update.message.reply_text(f"⚠️ Timed anti-scam reminders are {arg.upper()} for this group" + (f" (one every ~{SCAM_ALERT_EVERY_HOURS} hours)." if arg == "on" else "."))
+        await update.effective_message.reply_text(f"⚠️ Timed anti-scam reminders are {arg.upper()} for this group" + (f" (one every ~{SCAM_ALERT_EVERY_HOURS} hours)." if arg == "on" else "."))
     else:
-        await update.message.reply_text(f"Timed anti-scam reminders are {'ON' if store.scam_alerts_enabled(chat.id) else 'OFF'} for this group. Usage: /scamalerts on · /scamalerts off")
+        await update.effective_message.reply_text(f"Timed anti-scam reminders are {'ON' if store.scam_alerts_enabled(chat.id) else 'OFF'} for this group. Usage: /scamalerts on · /scamalerts off")
 
 async def job_scam_alerts(ctx: ContextTypes.DEFAULT_TYPE):
     now = int(time.time())
@@ -1529,9 +1532,9 @@ async def job_scam_alerts(ctx: ContextTypes.DEFAULT_TYPE):
 
 async def on_banstats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _can_moderate(update, ctx):
-        await update.message.reply_text("Only the owner, elevated users, or admins of a protected group can see this."); return
+        await update.effective_message.reply_text("Only the owner, elevated users, or admins of a protected group can see this."); return
     s = store.mod_stats()
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         f"🛡 *Protection stats*\n"
         f"Protected groups: {s['groups_protected']} (+{s['groups_pending']} pending approval)\n"
         f"Global bans: {s['gbans']}\n"
@@ -1573,20 +1576,20 @@ async def _hashtag_answer(update, tag):
 async def _set_group_text(update, ctx, key, label, show_cmd):
     chat = update.effective_chat
     if chat.type not in ("group", "supergroup"):
-        await update.message.reply_text(f"Set the {label} inside the group."); return
+        await update.effective_message.reply_text(f"Set the {label} inside the group."); return
     if not await _can_change(update, ctx):
-        await update.message.reply_text(f"Only group admins can set the {label}."); return
+        await update.effective_message.reply_text(f"Only group admins can set the {label}."); return
     text = " ".join(ctx.args or []).strip()
     if update.message.reply_to_message and update.message.reply_to_message.text:
         text = update.message.reply_to_message.text.strip()
     if not text:
         PENDING_INPUT[(chat.id, update.effective_user.id)] = {"kind": "rules" if key == "rules_text" else "welcome"}
-        await update.message.reply_text(f"Easy way: just send the {label} text as your next message and I'll save it. (/cancel stops.)\nOr all at once: /set{label} <text>"); return
+        await update.effective_message.reply_text(f"Easy way: just send the {label} text as your next message and I'll save it. (/cancel stops.)\nOr all at once: /set{label} <text>"); return
     if text.lower() == "clear":
         store.set_setting(chat.id, key, "")
-        await update.message.reply_text(f"{label.capitalize()} cleared."); return
+        await update.effective_message.reply_text(f"{label.capitalize()} cleared."); return
     store.set_setting(chat.id, key, text[:2000])
-    await update.message.reply_text(f"Saved — anyone can see it with {show_cmd}.")
+    await update.effective_message.reply_text(f"Saved — anyone can see it with {show_cmd}.")
 
 async def on_setrules(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await _set_group_text(update, ctx, "rules_text", "rules", "/rules or #rules")
@@ -1594,9 +1597,9 @@ async def on_setrules(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def on_rules(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat.type not in ("group", "supergroup"):
-        await update.message.reply_text("Rules live in groups."); return
+        await update.effective_message.reply_text("Rules live in groups."); return
     text = store.get_setting(chat.id, "rules_text")
-    await update.message.reply_text(("📜 Group rules\n\n" + text) if text else "No rules set for this group yet — an admin can set them with /setrules <text>.")
+    await update.effective_message.reply_text(("📜 Group rules\n\n" + text) if text else "No rules set for this group yet — an admin can set them with /setrules <text>.")
 
 async def on_setwelcome(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await _set_group_text(update, ctx, "welcome_text", "welcome", "/welcome")
@@ -1604,9 +1607,9 @@ async def on_setwelcome(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def on_welcome(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat.type not in ("group", "supergroup"):
-        await update.message.reply_text("Welcome notes live in groups."); return
+        await update.effective_message.reply_text("Welcome notes live in groups."); return
     text = store.get_setting(chat.id, "welcome_text")
-    await update.message.reply_text(text if text else "No welcome note set for this group yet — an admin can set one with /setwelcome <text>.")
+    await update.effective_message.reply_text(text if text else "No welcome note set for this group yet — an admin can set one with /setwelcome <text>.")
 
 # --- /report + per-group /faq (2026-10-25) ---
 
@@ -1669,51 +1672,51 @@ async def on_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def on_faq(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat.type not in ("group", "supergroup"):
-        await update.message.reply_text("FAQs live in groups."); return
+        await update.effective_message.reply_text("FAQs live in groups."); return
     q = " ".join(ctx.args or []).strip().lower()
     if q:
         a = store.faq_get(chat.id, q)
-        await update.message.reply_text(a if a else "No saved answer for that — /faq lists this group's saved questions.")
+        await update.effective_message.reply_text(a if a else "No saved answer for that — /faq lists this group's saved questions.")
         return
     qs = store.faq_list(chat.id)
     if not qs:
-        await update.message.reply_text("No FAQs saved for this group yet. An admin can add one: /addfaq <question> | <answer>")
+        await update.effective_message.reply_text("No FAQs saved for this group yet. An admin can add one: /addfaq <question> | <answer>")
     else:
-        await update.message.reply_text("❓ This group's FAQs:\n" + "\n".join(f"• {x}" for x in qs) + "\n\nAsk one with /faq <question> — or just type the question in chat.")
+        await update.effective_message.reply_text("❓ This group's FAQs:\n" + "\n".join(f"• {x}" for x in qs) + "\n\nAsk one with /faq <question> — or just type the question in chat.")
 
 async def on_addfaq(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat.type not in ("group", "supergroup"):
-        await update.message.reply_text("Add FAQs inside the group."); return
+        await update.effective_message.reply_text("Add FAQs inside the group."); return
     if not await _can_change(update, ctx):
-        await update.message.reply_text("Only group admins can add FAQs."); return
+        await update.effective_message.reply_text("Only group admins can add FAQs."); return
     parts = (update.message.text or "").split(None, 1)
     raw = parts[1] if len(parts) > 1 else ""
     if not raw:
         PENDING_INPUT[(chat.id, update.effective_user.id)] = {"kind": "faq_q"}
-        await update.message.reply_text("Let's add an FAQ the easy way — first, send the *question* as your next message. (/cancel stops.)", parse_mode=ParseMode.MARKDOWN); return
+        await update.effective_message.reply_text("Let's add an FAQ the easy way — first, send the *question* as your next message. (/cancel stops.)", parse_mode=ParseMode.MARKDOWN); return
     if "|" not in raw:
-        await update.message.reply_text("Usage: /addfaq <question> | <answer>\nExample: /addfaq where do I stake | Use /stake for the steps, or the guide on luncscan.com"); return
+        await update.effective_message.reply_text("Usage: /addfaq <question> | <answer>\nExample: /addfaq where do I stake | Use /stake for the steps, or the guide on luncscan.com"); return
     q, a = raw.split("|", 1)
     q, a = q.strip().lower(), a.strip()
     if not q or not a:
-        await update.message.reply_text("Both a question and an answer are needed: /addfaq <question> | <answer>"); return
+        await update.effective_message.reply_text("Both a question and an answer are needed: /addfaq <question> | <answer>"); return
     store.faq_add(chat.id, q[:120], a[:1000], update.effective_user.id)
-    await update.message.reply_text(f"✅ FAQ saved: '{q[:120]}' — /faq {q[:120]} shows it, and typing the question in chat works too.")
+    await update.effective_message.reply_text(f"✅ FAQ saved: '{q[:120]}' — /faq {q[:120]} shows it, and typing the question in chat works too.")
 
 async def on_delfaq(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat.type not in ("group", "supergroup"):
-        await update.message.reply_text("FAQs live in groups."); return
+        await update.effective_message.reply_text("FAQs live in groups."); return
     if not await _can_change(update, ctx):
-        await update.message.reply_text("Only group admins can remove FAQs."); return
+        await update.effective_message.reply_text("Only group admins can remove FAQs."); return
     q = " ".join(ctx.args or []).strip().lower()
     if not q:
-        await update.message.reply_text("Usage: /delfaq <question>"); return
+        await update.effective_message.reply_text("Usage: /delfaq <question>"); return
     if store.faq_remove(chat.id, q):
-        await update.message.reply_text("FAQ removed.")
+        await update.effective_message.reply_text("FAQ removed.")
     else:
-        await update.message.reply_text("No FAQ with that exact question — /faq lists them.")
+        await update.effective_message.reply_text("No FAQ with that exact question — /faq lists them.")
 
 # --- Simplify round (2026-10-25): buttons instead of typed commands ---
 
@@ -1721,9 +1724,9 @@ PENDING_INPUT = {}  # (chat_id, user_id) -> {"kind": faq_q|faq_a|rules|welcome, 
 
 async def on_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if PENDING_INPUT.pop((update.effective_chat.id, update.effective_user.id), None):
-        await update.message.reply_text("Cancelled.")
+        await update.effective_message.reply_text("Cancelled.")
     else:
-        await update.message.reply_text("Nothing to cancel.")
+        await update.effective_message.reply_text("Nothing to cancel.")
 
 MENU_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("💰 Price", callback_data="menu:price"), InlineKeyboardButton("📊 Stats", callback_data="menu:stats")],
@@ -1734,7 +1737,7 @@ MENU_KB = InlineKeyboardMarkup([
 ])
 
 async def on_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👇 Tap what you need — no commands to remember.\n(📖 Full command list: /help)", reply_markup=MENU_KB)
+    await update.effective_message.reply_text("👇 Tap what you need — no commands to remember.\n(📖 Full command list: /help)", reply_markup=MENU_KB)
 
 async def on_menu_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -1808,10 +1811,10 @@ def _panel_kb(chat):
 async def on_panel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat.type not in ("group", "supergroup"):
-        await update.message.reply_text("The admin panel works inside a group."); return
+        await update.effective_message.reply_text("The admin panel works inside a group."); return
     if not (_is_owner(update.effective_user.id) or await _can_change(update, ctx)):
-        await update.message.reply_text("Only group admins can use the panel."); return
-    await update.message.reply_text(_panel_text(chat), reply_markup=_panel_kb(chat))
+        await update.effective_message.reply_text("Only group admins can use the panel."); return
+    await update.effective_message.reply_text(_panel_text(chat), reply_markup=_panel_kb(chat))
 
 async def on_panel_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -1878,14 +1881,14 @@ async def on_mod_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def on_learn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
-        await update.message.reply_text("Usage: /learn <word> — try: " + ", ".join(GLOSSARY.keys())); return
+        await update.effective_message.reply_text("Usage: /learn <word> — try: " + ", ".join(GLOSSARY.keys())); return
     w = " ".join(ctx.args).lower()
-    if w in GLOSSARY: await update.message.reply_text(f"📖 *{w}*: {GLOSSARY[w]}", parse_mode=ParseMode.MARKDOWN); return
+    if w in GLOSSARY: await update.effective_message.reply_text(f"📖 *{w}*: {GLOSSARY[w]}", parse_mode=ParseMode.MARKDOWN); return
     if not await ai_guard(update): return
     out = await ai_client.chat([{"role":"system","content":"Explain the crypto/Terra Classic term in 2-3 plain lines for a beginner. No financial advice."},{"role":"user","content":w}], lang=user_lang(update))
     if not out:
         out = ai_client.DAILY_LIMIT_NOTE if budget.exhausted() else "I don't have that one yet — try /learn quorum"
-    await update.message.reply_text(out)
+    await update.effective_message.reply_text(out)
 
 # ================= GOV ALERTS (voting + proposals) =================
 def gov_keyboard(chat_id):
@@ -1908,9 +1911,9 @@ async def on_govalerts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     cid = update.effective_chat.id
     if ctx.args and ctx.args[0].lower() in ("on", "off"):
         if not await _can_change(update, ctx):
-            await update.message.reply_text("Only group admins can change this group's settings."); return
+            await update.effective_message.reply_text("Only group admins can change this group's settings."); return
         store.set_setting(cid, "gov_alerts", ctx.args[0].lower())
-    await update.message.reply_text(gov_status_text(cid), reply_markup=gov_keyboard(cid), parse_mode=ParseMode.MARKDOWN)
+    await update.effective_message.reply_text(gov_status_text(cid), reply_markup=gov_keyboard(cid), parse_mode=ParseMode.MARKDOWN)
 
 async def on_gov_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -1922,28 +1925,28 @@ async def on_gov_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await q.edit_message_text(gov_status_text(cid), reply_markup=gov_keyboard(cid), parse_mode=ParseMode.MARKDOWN)
 
 async def on_settings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⚙️ *Settings — notifications are your choice*\n🔥 /burnalerts — burn notifications\n🗳️ /govalerts — proposal & voting notifications\n🔀 /pralerts — GitHub PR notifications (repos: /prwatch)\n🏛️ /watchlist — validators watched in this chat", parse_mode=ParseMode.MARKDOWN)
+    await update.effective_message.reply_text("⚙️ *Settings — notifications are your choice*\n🔥 /burnalerts — burn notifications\n🗳️ /govalerts — proposal & voting notifications\n🔀 /pralerts — GitHub PR notifications (repos: /prwatch)\n🏛️ /watchlist — validators watched in this chat", parse_mode=ParseMode.MARKDOWN)
 
 # ================= VALIDATOR WATCH =================
 async def on_watchvalidator(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not ctx.args: await update.message.reply_text("Usage: /watchvalidator <moniker or terravaloper...>"); return
+    if not ctx.args: await update.effective_message.reply_text("Usage: /watchvalidator <moniker or terravaloper...>"); return
     try:
         v = await chain.find_validator(" ".join(ctx.args))
-        if not v: await update.message.reply_text("Validator not found."); return
+        if not v: await update.effective_message.reply_text("Validator not found."); return
         store.watch_validator(update.effective_chat.id, v["operator_address"], v["description"]["moniker"], json.dumps(chain.snapshot(v)))
-        await update.message.reply_text(f"👀 Watching *{v['description']['moniker']}* in this chat.\nI'll alert here if it gets jailed, changes status or commission, or its voting power moves >5%.", parse_mode=ParseMode.MARKDOWN)
-    except Exception: await update.message.reply_text("Couldn't add that validator right now.")
+        await update.effective_message.reply_text(f"👀 Watching *{v['description']['moniker']}* in this chat.\nI'll alert here if it gets jailed, changes status or commission, or its voting power moves >5%.", parse_mode=ParseMode.MARKDOWN)
+    except Exception: await update.effective_message.reply_text("Couldn't add that validator right now.")
 
 async def on_unwatchvalidator(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not ctx.args: await update.message.reply_text("Usage: /unwatchvalidator <terravaloper...> (see /watchlist)"); return
+    if not ctx.args: await update.effective_message.reply_text("Usage: /unwatchvalidator <terravaloper...> (see /watchlist)"); return
     n = store.unwatch_validator(update.effective_chat.id, ctx.args[0])
-    await update.message.reply_text("Stopped watching that validator in this chat." if n else "That validator isn't on this chat's watchlist.")
+    await update.effective_message.reply_text("Stopped watching that validator in this chat." if n else "That validator isn't on this chat's watchlist.")
 
 async def on_watchlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     rows = store.list_watched(update.effective_chat.id)
-    if not rows: await update.message.reply_text("No validators watched in this chat yet. Add one: /watchvalidator <name>"); return
+    if not rows: await update.effective_message.reply_text("No validators watched in this chat yet. Add one: /watchvalidator <name>"); return
     lines = ["👀 *Watched in this chat:*"] + [f"• {r['moniker']} — {r['valoper']}" for r in rows]
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+    await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
 # ================= GITHUB PR INFO + ALERTS =================
 def _msg_thread(update):
@@ -1972,18 +1975,18 @@ async def on_pralerts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     arg = (ctx.args or [""])[0].lower()
     if arg in ("on", "off"):
         if not await _can_change_pr(update, ctx):
-            await update.message.reply_text("Only group admins can change this group's settings."); return
+            await update.effective_message.reply_text("Only group admins can change this group's settings."); return
         on = arg == "on"
         store.set_pr_alerts(chat.id, on)
         if on and not store.pr_watch_list(chat.id):
             for repo in github_pr.DEFAULT_REPOS:
                 store.pr_watch_add(chat.id, repo, _msg_thread(update))
-            await update.message.reply_text(
+            await update.effective_message.reply_text(
                 "🔀 PR notifications ON — no repos were configured for this chat, so it now watches the defaults:\n"
                 + "\n".join("• " + r for r in github_pr.DEFAULT_REPOS)
                 + "\nChange them with /prwatch add <owner/repo> · /prwatch remove <owner/repo>")
             return
-    await update.message.reply_text(pr_alerts_text(chat.id), parse_mode=ParseMode.MARKDOWN)
+    await update.effective_message.reply_text(pr_alerts_text(chat.id), parse_mode=ParseMode.MARKDOWN)
 
 async def on_prwatch(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
@@ -1991,45 +1994,45 @@ async def on_prwatch(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     sub = args[0].lower() if args else ""
     if sub in ("add", "remove"):
         if not await _can_change_pr(update, ctx):
-            await update.message.reply_text("Only group admins can change this group's settings."); return
+            await update.effective_message.reply_text("Only group admins can change this group's settings."); return
         if len(args) < 2 or not github_pr.valid_repo(args[1]):
-            await update.message.reply_text("Usage: /prwatch add <owner/repo> — e.g. /prwatch add terra-classic-io/website"); return
+            await update.effective_message.reply_text("Usage: /prwatch add <owner/repo> — e.g. /prwatch add terra-classic-io/website"); return
         repo = args[1]
         if sub == "add":
             store.pr_watch_add(chat.id, repo, _msg_thread(update))
             note = "" if store.pr_alerts_enabled(chat.id) else "\nNotifications are OFF for this chat — turn them on with /pralerts on."
-            await update.message.reply_text(f"👀 Watching {repo} in this chat.{note}")
+            await update.effective_message.reply_text(f"👀 Watching {repo} in this chat.{note}")
         else:
             n = store.pr_watch_remove(chat.id, repo)
-            await update.message.reply_text(f"Stopped watching {repo} in this chat." if n else f"{repo} isn't on this chat's watch list.")
+            await update.effective_message.reply_text(f"Stopped watching {repo} in this chat." if n else f"{repo} isn't on this chat's watch list.")
         return
     rows = store.pr_watch_list(chat.id)
     if not rows:
-        await update.message.reply_text("No repos watched in this chat yet. Add one: /prwatch add <owner/repo>\nNotifications are managed with /pralerts on · /pralerts off."); return
+        await update.effective_message.reply_text("No repos watched in this chat yet. Add one: /prwatch add <owner/repo>\nNotifications are managed with /pralerts on · /pralerts off."); return
     state = "ON" if store.pr_alerts_enabled(chat.id) else "OFF"
     lines = [f"👀 *PR watch — notifications {state}*"] + [f"• {r['repo']}" for r in rows]
     lines.append("Add: /prwatch add <owner/repo> · Remove: /prwatch remove <owner/repo>")
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+    await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
 async def on_pr(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     watched = [r["repo"] for r in store.pr_watch_list(update.effective_chat.id)]
     repo, number, err = github_pr.parse_pr_args(ctx.args, watched)
     if err:
-        await update.message.reply_text(err); return
+        await update.effective_message.reply_text(err); return
     try:
         pr, latest = await github_pr.fetch_pr_detail(repo, number)
     except github_pr.GhError as e:
         if e.status == 404:
-            await update.message.reply_text(f"Couldn't find PR #{number} in {repo} — check the repo and number.")
+            await update.effective_message.reply_text(f"Couldn't find PR #{number} in {repo} — check the repo and number.")
         elif github_pr.is_rate_limited(e):
-            await update.message.reply_text("GitHub is rate-limiting right now — try again in a bit.")
+            await update.effective_message.reply_text("GitHub is rate-limiting right now — try again in a bit.")
         else:
-            await update.message.reply_text("Couldn't fetch that PR from GitHub right now.")
+            await update.effective_message.reply_text("Couldn't fetch that PR from GitHub right now.")
         return
     except Exception:
-        await update.message.reply_text("Couldn't fetch that PR from GitHub right now.")
+        await update.effective_message.reply_text("Couldn't fetch that PR from GitHub right now.")
         return
-    await update.message.reply_text(github_pr.format_pr_detail(repo, pr, latest))
+    await update.effective_message.reply_text(github_pr.format_pr_detail(repo, pr, latest))
 
 # ================= WATCH JOBS =================
 async def job_gov_check(ctx: ContextTypes.DEFAULT_TYPE):
@@ -2169,7 +2172,7 @@ async def job_burn_daily(ctx: ContextTypes.DEFAULT_TYPE):
 
 async def on_proposal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
-        await update.message.reply_text("Usage: /proposal 12234"); return
+        await update.effective_message.reply_text("Usage: /proposal 12234"); return
     pid = ctx.args[0]
     try:
         async with httpx.AsyncClient(timeout=20) as c:
@@ -2181,16 +2184,16 @@ async def on_proposal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except Exception: pass
         await send_long(update, f"🗳️ Proposal {pid}: {p.get('title','')}\nStatus: {p.get('status')}\nVoting ends: {p.get('voting_end_time')} UTC{extra}")
     except Exception as e:
-        await update.message.reply_text(f"Couldn't fetch proposal {pid} right now.")
+        await update.effective_message.reply_text(f"Couldn't fetch proposal {pid} right now.")
 
 async def on_price(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         async with httpx.AsyncClient(timeout=20) as c:
             r = await c.get("https://api.coingecko.com/api/v3/simple/price?ids=terra-luna&vs_currencies=usd&include_24hr_change=true"); r.raise_for_status()
             d = r.json()["terra-luna"]
-        await update.message.reply_text(f"LUNC (Terra Classic): ${d['usd']} ({d.get('usd_24h_change',0):.2f}% 24h) — via CoinGecko, check live before trading.")
+        await update.effective_message.reply_text(f"LUNC (Terra Classic): ${d['usd']} ({d.get('usd_24h_change',0):.2f}% 24h) — via CoinGecko, check live before trading.")
     except Exception:
-        await update.message.reply_text("Couldn't fetch price right now.")
+        await update.effective_message.reply_text("Couldn't fetch price right now.")
 
 async def on_edited_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Protected groups: an edit gets the anti-scam checks too —
@@ -2342,18 +2345,18 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             _kind = _pend["kind"]
             if _kind == "faq_q":
                 PENDING_INPUT[(chat.id, user.id)] = {"kind": "faq_a", "q": text.strip().lower()[:120]}
-                await update.message.reply_text("Got it. Now send the *answer* for that question.", parse_mode=ParseMode.MARKDOWN)
+                await update.effective_message.reply_text("Got it. Now send the *answer* for that question.", parse_mode=ParseMode.MARKDOWN)
                 return
             PENDING_INPUT.pop((chat.id, user.id), None)
             if _kind == "faq_a":
                 store.faq_add(chat.id, _pend["q"], text.strip()[:1000], user.id)
-                await update.message.reply_text(f"✅ FAQ saved: '{_pend['q']}' — typing that question in chat now answers it.")
+                await update.effective_message.reply_text(f"✅ FAQ saved: '{_pend['q']}' — typing that question in chat now answers it.")
             elif _kind == "rules":
                 store.set_setting(chat.id, "rules_text", text.strip()[:2000])
-                await update.message.reply_text("📜 Rules saved — /rules or #rules shows them.")
+                await update.effective_message.reply_text("📜 Rules saved — /rules or #rules shows them.")
             elif _kind == "welcome":
                 store.set_setting(chat.id, "welcome_text", text.strip()[:2000])
-                await update.message.reply_text("👋 Welcome note saved — new joiners will see it.")
+                await update.effective_message.reply_text("👋 Welcome note saved — new joiners will see it.")
             return
     # Hashtag topics (groups): #memo, #scammed, ... get a ready answer
     if chat.type in ("group", "supergroup"):
@@ -2361,14 +2364,14 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if _tag:
             _ans = await _hashtag_answer(update, _tag)
             if _ans:
-                await update.message.reply_text(_ans)
+                await update.effective_message.reply_text(_ans)
                 return
         # FAQ exact match: a message that IS a saved question gets its answer
         if 0 < len(text) <= 120:
             _fa = store.faq_get(chat.id, text.strip().lower())
             if _fa and int(time.time()) - TAG_COOLDOWN.get((chat.id, "faq"), 0) >= 60:
                 TAG_COOLDOWN[(chat.id, "faq")] = int(time.time())
-                await update.message.reply_text(_fa)
+                await update.effective_message.reply_text(_fa)
                 return
     # Mention = ask
     bot_name = (await ctx.bot.get_me()).username
