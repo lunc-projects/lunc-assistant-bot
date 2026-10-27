@@ -599,6 +599,7 @@ GAMES_TEXT = (
     "🎱 *LUNA POOL* — moon pool. Pull back, aim, and sink all 8 moon balls in as few shots as you can. Every ball is worth 100 and clearing the rack pays a 250 bonus.\n\n"
     "🧟 *ZOMBIE DEFENSE* — the horde is coming for the moon base. Hold three lanes, blast the waves, and spend your points on upgrades between rounds.\n\n"
     "🧱 *LUNA BREAKOUT* — the arcade classic, Luna style. Smash the brick wall with paddle and ball — and when the glowing LUNC block drops, the whole wall lights up.\n\n"
+    "🧗 *LUNA CLIMB* — bounce to the Moon! Ride the moon-rock platforms higher and higher — grab a jetpack, propeller cap, shield or coin magnet, stomp the comet critters, and beat your own best-height flag.\n\n"
     "Tap a game to play — it opens right here in Telegram.")
 NEON_RUSH_URL = "https://frg-fight-club.vercel.app/neon-rush/"
 SOLITAIRE_URL = "https://frg-fight-club.vercel.app/solitaire/"
@@ -619,6 +620,7 @@ RIDER_URL = "https://frg-fight-club.vercel.app/luna-rider/"
 POOL_URL = "https://frg-fight-club.vercel.app/pool/"
 ZOMBIE_URL = "https://frg-fight-club.vercel.app/zombie/"
 BREAKOUT_URL = "https://frg-fight-club.vercel.app/breakout/"
+CLIMB_URL = "https://frg-fight-club.vercel.app/climb/"
 
 # Native Telegram Games (registered in BotFather for this bot). The short
 # names are the identifiers Telegram sends back when a player taps Play.
@@ -642,6 +644,7 @@ TELEGRAM_GAMES = (
     ("LunaPool", "🎱 LUNA POOL", POOL_URL),
     ("ZOMBIEDEFENSE", "🧟 ZOMBIE DEFENSE", ZOMBIE_URL),
     ("LunaBreakout", "🧱 LUNA BREAKOUT", BREAKOUT_URL),
+    ("LUNACLIMB", "🧗 LUNA CLIMB", CLIMB_URL),
 )
 GAME_URL_BY_SHORT_NAME = {short: url for short, _, url in TELEGRAM_GAMES}
 # Telegram echoes the short name exactly as registered in BotFather, which
@@ -671,6 +674,7 @@ GAME_BOARD_APIS = (
     ("LunaPool", "🎱 *LUNA POOL*", "https://frg-fight-club.vercel.app/api/luna-games?game=pool"),
     ("ZOMBIEDEFENSE", "🧟 *ZOMBIE DEFENSE*", "https://frg-fight-club.vercel.app/api/luna-games?game=zombie"),
     ("LunaBreakout", "🧱 *LUNA BREAKOUT*", "https://frg-fight-club.vercel.app/api/luna-games?game=breakout"),
+    ("LUNACLIMB", "🧗 *LUNA CLIMB*", "https://frg-fight-club.vercel.app/api/luna-games?game=climb"),
 )
 
 async def _fetch_board(url):

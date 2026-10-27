@@ -106,14 +106,24 @@ def check(name, cond):
         fails.append(name)
 
 
-check("six native games", [g[0] for g in bot.TELEGRAM_GAMES] == ["neonrush", "solitaire", "hoops", "penalty", "darts", "LunaBlocks"])
+ALL_SHORT_NAMES = ["neonrush", "solitaire", "hoops", "Penalty", "Darts", "LunaBlocks",
+                   "Lunagolf", "LunaDefender", "LunaTower", "LunaSnake", "LunaFlap",
+                   "LunaPinball", "LunaRacer", "LunaCannon", "LunaWhack", "LunaRider",
+                   "LunaPool", "ZOMBIEDEFENSE", "LunaBreakout", "LUNACLIMB"]
+check("twenty native games", [g[0] for g in bot.TELEGRAM_GAMES] == ALL_SHORT_NAMES)
 check("short names map to the live pages",
       bot.GAME_URL_BY_SHORT_NAME["neonrush"].endswith("/neon-rush/")
       and bot.GAME_URL_BY_SHORT_NAME["solitaire"].endswith("/solitaire/")
       and bot.GAME_URL_BY_SHORT_NAME["hoops"].endswith("/hoops/")
-      and bot.GAME_URL_BY_SHORT_NAME["penalty"].endswith("/penalty/")
-      and bot.GAME_URL_BY_SHORT_NAME["darts"].endswith("/darts/")
-      and bot.GAME_URL_BY_SHORT_NAME["LunaBlocks"].endswith("/blocks/"))
+      and bot.GAME_URL_BY_SHORT_NAME["Penalty"].endswith("/penalty/")
+      and bot.GAME_URL_BY_SHORT_NAME["Darts"].endswith("/darts/")
+      and bot.GAME_URL_BY_SHORT_NAME["LunaBlocks"].endswith("/blocks/")
+      and bot.GAME_URL_BY_SHORT_NAME["LUNACLIMB"] == bot.CLIMB_URL
+      and bot.GAME_URL_BY_SHORT_NAME["LUNACLIMB"].endswith("/climb/"))
+check("climb board fetch URL is the router endpoint for game=climb",
+      dict((s, a) for s, _t, a in bot.GAME_BOARD_APIS)["LUNACLIMB"]
+      == "https://frg-fight-club.vercel.app/api/luna-games?game=climb")
+check("games text describes Luna Climb", "LUNA CLIMB" in bot.GAMES_TEXT)
 
 
 class FakeBot:
@@ -158,6 +168,7 @@ async def group_case():
     update = types.SimpleNamespace(
         effective_chat=types.SimpleNamespace(id=-100123, type="supergroup"),
         message=message,
+        effective_message=message,
     )
     fake_bot = FakeBot()
     await bot.on_games(update, types.SimpleNamespace(bot=fake_bot))
@@ -168,13 +179,13 @@ async def group_case():
         rows = kwargs["reply_markup"].inline_keyboard
         flat = [b for row in rows for b in row]
         check("picker has one button per game",
-              [b.callback_data for b in flat] == ["pick:neonrush", "pick:solitaire", "pick:hoops", "pick:penalty", "pick:darts", "pick:LunaBlocks"])
-        check("picker text shows the Neon leader", "1. Tom — 1,192" in text)
-        check("picker text marks the empty Solitaire board", text.count("No scores yet") == 1)
-        check("picker text admits an unavailable board", "Leaderboard unavailable right now." in text)
-        check("picker text shows the Penalty leader", "1. Zed — 500" in text)
-        check("picker text titles all six boards",
-              all(t in text for t in ("*NEON RUSH*", "*SOLITAIRE*", "*HOOPS*", "*PENALTY KICK*", "*DARTS*", "*LUNA BLOCKS*")))
+              [b.callback_data for b in flat] == [f"pick:{s}" for s in ALL_SHORT_NAMES])
+        check("picker text shows the Neon leader", "Tom 1,192" in text)
+        check("picker text marks the empty Solitaire board", text.count("no scores yet") == 1)
+        check("picker text admits an unavailable board", "leaderboard unavailable right now" in text)
+        check("picker text shows the Penalty leader", "Zed 500" in text)
+        check("picker text titles all twenty boards",
+              all(t in text for _s, t, _a in bot.GAME_BOARD_APIS))
 
 
 class FakePick:
@@ -216,6 +227,36 @@ async def pick_case():
                                types.SimpleNamespace(bot=fake_bot))
     check("topic fallback link also carries the thread id",
           fake_bot.sent_messages[-1][2].get("message_thread_id") == 777)
+    # Case: send_game must receive the short name exactly as registered in
+    # BotFather (Telegram treats them as case-sensitive) even when the
+    # incoming callback data arrives in a different case.
+    q5 = FakePick("pick:LunaDefender")
+    await bot.on_pick_callback(types.SimpleNamespace(callback_query=q5),
+                               types.SimpleNamespace(bot=fake_bot))
+    check("pick sends the registered case (LunaDefender)",
+          fake_bot.sent_games[-1] == (-100123, "LunaDefender"))
+    q6 = FakePick("pick:lunadefender")
+    await bot.on_pick_callback(types.SimpleNamespace(callback_query=q6),
+                               types.SimpleNamespace(bot=fake_bot))
+    check("lowercase pick data still sends the registered case",
+          fake_bot.sent_games[-1] == (-100123, "LunaDefender"))
+    q7 = FakePick("pick:LUNABLOCKS")
+    await bot.on_pick_callback(types.SimpleNamespace(callback_query=q7),
+                               types.SimpleNamespace(bot=fake_bot))
+    check("uppercase pick data still sends the registered case (LunaBlocks)",
+          fake_bot.sent_games[-1] == (-100123, "LunaBlocks"))
+    # LUNACLIMB is registered ALL CAPS in BotFather — the picker must send
+    # exactly that, whatever case the callback data arrives in.
+    q8 = FakePick("pick:lunaclimb")
+    await bot.on_pick_callback(types.SimpleNamespace(callback_query=q8),
+                               types.SimpleNamespace(bot=fake_bot))
+    check("lowercase pick data still sends the registered case (LUNACLIMB)",
+          fake_bot.sent_games[-1] == (-100123, "LUNACLIMB"))
+    q9 = FakePick("pick:LUNACLIMB")
+    await bot.on_pick_callback(types.SimpleNamespace(callback_query=q9),
+                               types.SimpleNamespace(bot=fake_bot))
+    check("exact-case pick sends LUNACLIMB",
+          fake_bot.sent_games[-1] == (-100123, "LUNACLIMB"))
 
 
 asyncio.run(pick_case())
@@ -243,6 +284,9 @@ async def callback_case():
     q3 = FakeCallback("Hoops")
     await bot.on_game_callback(types.SimpleNamespace(callback_query=q3), None)
     check("BotFather case difference still resolves", q3.answer_args == {"url": bot.HOOPS_URL})
+    q4 = FakeCallback("LUNACLIMB")
+    await bot.on_game_callback(types.SimpleNamespace(callback_query=q4), None)
+    check("Play callback returns the Climb URL", q4.answer_args == {"url": bot.CLIMB_URL})
 
 
 asyncio.run(callback_case())
@@ -260,7 +304,7 @@ class FakeInlineQuery:
 async def inline_case():
     iq = FakeInlineQuery("")
     await bot.on_inline_query(types.SimpleNamespace(inline_query=iq), None)
-    check("empty inline query offers all six games", iq.answer_args[0] == ["neonrush", "solitaire", "hoops", "penalty", "darts", "LunaBlocks"])
+    check("empty inline query offers all twenty games", iq.answer_args[0] == ALL_SHORT_NAMES)
     iq2 = FakeInlineQuery("hoop")
     await bot.on_inline_query(types.SimpleNamespace(inline_query=iq2), None)
     check("inline search filters by name", iq2.answer_args[0] == ["hoops"])
@@ -269,7 +313,7 @@ async def inline_case():
     check("inline search finds Luna Blocks", iq3.answer_args[0] == ["LunaBlocks"])
     iq4 = FakeInlineQuery("penalty")
     await bot.on_inline_query(types.SimpleNamespace(inline_query=iq4), None)
-    check("inline search finds Penalty Kick", iq4.answer_args[0] == ["penalty"])
+    check("inline search finds Penalty Kick", iq4.answer_args[0] == ["Penalty"])
 
 
 asyncio.run(inline_case())
