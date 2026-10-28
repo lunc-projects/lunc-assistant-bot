@@ -59,22 +59,50 @@ def test_chat_cap():
 
 
 def test_rank_caps():
+    # Since 2026-10-27 the personal cap is flat: 1/day even at rank 2.
     fresh()
-    for _ in range(6):
-        assert ratelimit.allowed_for_rank(7, -300, OWNER, rank=2, now=DAY1) is True
+    assert ratelimit.allowed_for_rank(7, -300, OWNER, rank=2, now=DAY1) is True
     assert ratelimit.allowed_for_rank(7, -300, OWNER, rank=2, now=DAY1) is False
     assert ratelimit.allowed_for_rank(7, -300, OWNER, rank=2, now=DAY2) is True
 
 
 def test_rank_zero_and_one_caps():
     fresh()
-    for _ in range(2):
-        assert ratelimit.allowed_for_rank(8, -400, OWNER, rank=0, now=DAY1) is True
+    assert ratelimit.allowed_for_rank(8, -400, OWNER, rank=0, now=DAY1) is True
     assert ratelimit.allowed_for_rank(8, -400, OWNER, rank=0, now=DAY1) is False
     fresh()
-    for _ in range(4):
-        assert ratelimit.allowed_for_rank(9, -500, OWNER, rank=1, now=DAY1) is True
+    assert ratelimit.allowed_for_rank(9, -500, OWNER, rank=1, now=DAY1) is True
     assert ratelimit.allowed_for_rank(9, -500, OWNER, rank=1, now=DAY1) is False
+
+
+def test_override_caps():
+    # An owner-set rank (overridden=True) keeps the old ladder: the
+    # explicit owner decision wins over the flat 1.
+    fresh()
+    for _ in range(2):
+        assert ratelimit.allowed_for_rank(11, -600, OWNER, rank=0, overridden=True, now=DAY1) is True
+    assert ratelimit.allowed_for_rank(11, -600, OWNER, rank=0, overridden=True, now=DAY1) is False
+    fresh()
+    for _ in range(4):
+        assert ratelimit.allowed_for_rank(12, -700, OWNER, rank=1, overridden=True, now=DAY1) is True
+    assert ratelimit.allowed_for_rank(12, -700, OWNER, rank=1, overridden=True, now=DAY1) is False
+    fresh()
+    for _ in range(6):
+        assert ratelimit.allowed_for_rank(13, -800, OWNER, rank=2, overridden=True, now=DAY1) is True
+    assert ratelimit.allowed_for_rank(13, -800, OWNER, rank=2, overridden=True, now=DAY1) is False
+
+
+def test_chat_caps_by_rank():
+    # Per-chat caps are unchanged (10/20/30 by the caller's rank); use a
+    # fresh user per call so the flat personal cap never interferes.
+    fresh()
+    for u in range(10):
+        assert ratelimit.allowed_for_rank(2000 + u, -900, OWNER, rank=0, now=DAY1) is True
+    assert ratelimit.allowed_for_rank(2999, -900, OWNER, rank=0, now=DAY1) is False
+    fresh()
+    for u in range(30):
+        assert ratelimit.allowed_for_rank(3000 + u, -950, OWNER, rank=2, now=DAY1) is True
+    assert ratelimit.allowed_for_rank(3999, -950, OWNER, rank=2, now=DAY1) is False
 
 
 if __name__ == "__main__":

@@ -66,7 +66,7 @@ Or just @mention me in the group, or DM me
 
 *Ranks (AI access)*
 /rank — your rank + what it unlocks
-Rank 0: starting out, 2 AI queries/day · Rank 1: regular (3+ days), 4 AI queries/day · Rank 2: trusted (30+ days), 6 AI queries/day
+AI queries: 1 per day for everyone, whatever your rank. Rank 0: starting out · Rank 1: regular (3+ days) · Rank 2: trusted (30+ days) — your rank sets this group's shared daily AI allowance (10/20/30 calls a day). A rank the owner sets by hand (/rankset) still sets that person's own cap (2/4/6 by rank).
 Rank is earned by chatting on distinct days (not message count). Owner: /rankset, /rankclear (in groups)
 
 *Daily AI pot*
@@ -191,11 +191,13 @@ async def on_rank(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         rank, days, override = store.rank_info(chat.id, user.id)
         scope = "in this chat"
     if rank == 0:
-        unlocks = "AI queries at the starter cap: 2 per day. Chat on 3 different days to reach rank 1 (4 per day)."
+        unlocks = "AI queries: 1 per day for everyone — rank no longer raises the personal limit. Your rank sets this chat's shared AI allowance: 10 calls/day at rank 0. Chat on 3 different days to reach rank 1 (20/day for the chat)."
     elif rank == 1:
-        unlocks = "AI queries unlocked (daily cap: 4 per day). Chat on 30 different days to reach rank 2 (6 per day)."
+        unlocks = "AI queries: 1 per day for everyone — rank no longer raises the personal limit. Your rank gives this chat a shared AI allowance of 20 calls/day. Chat on 30 different days to reach rank 2 (30/day for the chat)."
     else:
-        unlocks = "AI queries unlocked (top daily cap: 6 per day)."
+        unlocks = "AI queries: 1 per day for everyone — rank no longer raises the personal limit. Your rank gives this chat the top shared AI allowance: 30 calls/day."
+    if override is not None:
+        unlocks += " Your rank was set by the owner, so your own AI cap follows the set rank instead (2/4/6 per day by rank)."
     extra = " (set by the owner)" if override is not None else ""
     await update.effective_message.reply_text(
         f"🎖 Your rank {scope}: {rank}{extra}\n"
@@ -285,7 +287,9 @@ GROUP_AI_OFF_NOTE = (
 
 async def ai_guard(update):
     """AI gate: kill switch, then the group's own AI switch, then the
-    caller's AI ban, then the rank daily caps (2/4/6 by rank).
+    caller's AI ban, then the daily caps — 1 AI call per user per day
+    for everyone (an owner-set rank override keeps the 2/4/6 ladder for
+    that person), plus the per-chat caps (10/20/30 by rank).
     False = message already sent."""
     if not AI_ENABLED:
         await update.effective_message.reply_text(
@@ -302,12 +306,19 @@ async def ai_guard(update):
         return False
     if chat.type == "private":
         rank = store.rank_anywhere(user_id)
+        overridden = False  # rank overrides are per-group; DM rank is earned-only
     else:
-        rank = store.rank_for(chat.id, user_id)
-    if ratelimit.allowed_for_rank(user_id, chat.id, OWNER_ID, rank=rank):
+        rank, _days, override = store.rank_info(chat.id, user_id)
+        overridden = override is not None
+    if ratelimit.allowed_for_rank(user_id, chat.id, OWNER_ID, rank=rank, overridden=overridden):
         return True
-    await update.effective_message.reply_text(
-        "⏳ You've hit your daily AI limit — it resets at midnight UTC. (Ranks allow 2, 4, or 6 AI questions a day; this cap protects the bot's AI quota from spam.)")
+    if overridden:
+        note = ("⏳ You've hit your daily AI limit — it resets at midnight UTC. "
+                "(Your rank was set by the owner, so your cap follows it; daily caps protect the bot's AI quota from spam.)")
+    else:
+        note = ("⏳ You've hit your daily AI limit — one AI question per day for everyone, "
+                "and it resets at midnight UTC. (This cap protects the bot's AI quota from spam.)")
+    await update.effective_message.reply_text(note)
     return False
 
 FALLBACK_NOTE = "📋 Basic summary (AI is off — no AI used):\n\n"
@@ -795,7 +806,7 @@ PRIVACY_TEXT = (
     "• *What it logs:* in groups, message text is kept for 7 days so /summary and /catchup can work, then deleted automatically. Your rank counts the days you chat — commands don't count.\n\n"
     "• *What the AI sees:* only when someone uses an AI feature (/ask, /summary, mentions, DM summaries). Then the AI service (Groq) receives the message text and usernames needed for that one answer. Simple commands (/price, /validators, …) send nothing anywhere.\n\n"
     "• *Your group's controls:* group admins run this group — including AI on/off (/aioff, /aion), alert settings, and notification choices. Usage stats are owner-only.\n\n"
-    "• *The limits:* ranks allow 2 (starting), 4, or 6 AI questions a day depending on time in the community, moderators can AI-ban an abusive account from AI features only (simple commands keep working), and a hard daily token budget (200,000/day) means the AI quota can't be drained by spam — the worst case is AI pausing until midnight UTC.\n\n"
+    "• *The limits:* everyone gets 1 AI question a day (a rank the owner sets by hand for a specific person can raise that person's own cap), moderators can AI-ban an abusive account from AI features only (simple commands keep working), and a hard daily token budget (200,000/day) means the AI quota can't be drained by spam — the worst case is AI pausing until midnight UTC.\n\n"
     "• *Group protection (opt-in):* in groups whose admins registered with /protect and the owner approved, new joiners pass a short safety check before they can post, accounts on the network's global scam-ban list are removed on sight, and a member whose first message contains a link is removed. Moderators can also mute members, keep a word blacklist, trigger anti-raid lockdowns during join surges, and switch on timed safety reminders. Protected-group admins, owner-appointed elevated users, and the owner control the ban list — with rails on that power: every global ban is written to a permanent moderation log, the owner is alerted instantly with a one-tap undo, non-owner moderators are limited to 5 global bans a day, and only the owner can global-ban an elevated user or another protected group's admin. Automatic anti-spam also mutes message flooding, flags the same long message posted across protected groups, and starts brand-new-looking accounts text-only for 24 hours; banned users can appeal to the owner once a day with /appeal.\n\n"
     "• *Don't take our word for it:* the bot's code is public — read exactly what it does: github.com/lunc-projects/lunc-assistant-bot")
 
@@ -805,12 +816,12 @@ async def on_privacy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def _ai_toggle(update: Update, ctx: ContextTypes.DEFAULT_TYPE, on: bool):
     chat = update.effective_chat
     if chat.type == "private":
-        await update.effective_message.reply_text("This switch is for groups — in DM, your AI access follows your rank and the daily limits."); return
+        await update.effective_message.reply_text("This switch is for groups — in DM, the daily limit applies (1 AI question a day for everyone)."); return
     if not await _can_change(update, ctx):
         await update.effective_message.reply_text("Only group admins can change this group's AI setting."); return
     store.set_ai_enabled(chat.id, on)
     await update.effective_message.reply_text(
-        "🤖 AI is ON for this group (rank gates and daily limits still apply)." if on
+        "🤖 AI is ON for this group (daily limits still apply)." if on
         else "🔒 AI is OFF for this group — no AI calls will be made here. Simple commands still work. An admin can turn it back on with /aion.")
 
 async def on_aion(update: Update, ctx: ContextTypes.DEFAULT_TYPE):

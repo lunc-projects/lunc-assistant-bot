@@ -69,24 +69,31 @@ check(store._rank_from_days(3) == 1, "3 days = rank 1")
 check(store._rank_from_days(29) == 1, "29 days = rank 1")
 check(store._rank_from_days(30) == 2, "30 days = rank 2")
 
-print("== rank-aware caps ==")
+print("== rank-aware caps (flat 1/day since 2026-10-27) ==")
+for r in (0, 1, 2):
+    ratelimit.reset()
+    check(ratelimit.allowed_for_rank(5, -100, 0, rank=r, now=1000.0),
+          f"rank {r} allows the 1 daily AI call")
+    check(not ratelimit.allowed_for_rank(5, -100, 0, rank=r, now=1001.0),
+          f"rank {r} blocks the 2nd call/day (flat cap, rank no longer raises it)")
+print("== owner-set rank overrides keep the old ladder ==")
 ratelimit.reset()
-ok = all(ratelimit.allowed_for_rank(5, -100, 0, rank=0, now=1000.0 + i) for i in range(2))
-check(ok, "rank 0 (starting) allows 2/day")
-check(not ratelimit.allowed_for_rank(5, -100, 0, rank=0, now=1000.0 + 3),
-      "rank 0 blocks 3rd/day")
+ok = all(ratelimit.allowed_for_rank(5, -100, 0, rank=0, overridden=True, now=1000.0 + i) for i in range(2))
+check(ok, "override rank 0 allows 2/day")
+check(not ratelimit.allowed_for_rank(5, -100, 0, rank=0, overridden=True, now=1000.0 + 3),
+      "override rank 0 blocks 3rd/day")
 ratelimit.reset()
-ok = all(ratelimit.allowed_for_rank(5, -100, 0, rank=1, now=1000.0 + i) for i in range(4))
-check(ok, "rank 1 allows 4/day")
-check(not ratelimit.allowed_for_rank(5, -100, 0, rank=1, now=1000.0 + 5),
-      "rank 1 blocks 5th/day")
+ok = all(ratelimit.allowed_for_rank(5, -100, 0, rank=1, overridden=True, now=1000.0 + i) for i in range(4))
+check(ok, "override rank 1 allows 4/day")
+check(not ratelimit.allowed_for_rank(5, -100, 0, rank=1, overridden=True, now=1000.0 + 5),
+      "override rank 1 blocks 5th/day")
 ratelimit.reset()
-ok = all(ratelimit.allowed_for_rank(5, -100, 0, rank=2, now=1000.0 + i) for i in range(6))
-check(ok, "rank 2 allows 6/day")
-check(not ratelimit.allowed_for_rank(5, -100, 0, rank=2, now=1000.0 + 7),
-      "rank 2 blocks 7th/day")
+ok = all(ratelimit.allowed_for_rank(5, -100, 0, rank=2, overridden=True, now=1000.0 + i) for i in range(6))
+check(ok, "override rank 2 allows 6/day")
+check(not ratelimit.allowed_for_rank(5, -100, 0, rank=2, overridden=True, now=1000.0 + 7),
+      "override rank 2 blocks 7th/day")
 ratelimit.reset()
-check(ratelimit.allowed(5, -100, 0, now=2000.0), "legacy allowed() still works (rank 1 caps)")
+check(ratelimit.allowed(5, -100, 0, now=2000.0), "legacy allowed() still works (flat 1 + rank-1 chat cap)")
 ratelimit.reset()
 check(all(ratelimit.allowed_for_rank(999, -100, 999, rank=0, now=3000.0 + i) for i in range(5)),
       "owner exempt from caps regardless of rank")

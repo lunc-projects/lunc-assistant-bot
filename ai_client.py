@@ -9,8 +9,42 @@ AI_MODEL = os.getenv("AI_MODEL", "gpt-4o-mini")
 # Groq quick-start: set AI_BASE_URL=https://api.groq.com/openai/v1 and AI_MODEL=llama-3.1-8b-instant
 
 # Minimized so the daily pot lasts: short answers, trimmed transcripts.
-MAX_TOKENS = 500
+# 250 (cut from 500, owner decision 2026-10-27) — a code constant, NOT an
+# env var: no MAX_TOKENS env read exists anywhere in the bot, so this
+# value is what Railway runs unless the code changes.
+MAX_TOKENS = 250
 TRANSCRIPT_CHARS = 10_000
+
+# Standing instructions appended to the system message of EVERY AI call
+# (ask, mentions, summaries, tldr) — one enforcement point, so no AI path
+# can skip them. Owner decisions 2026-10-27: smaller answers, text-only
+# answers, and hard content rules with an explicit carve-out for
+# defensive security education (a core job of this bot).
+AI_RULES = (
+    "Standing rules for every answer: Keep it short and plain — a few sentences, "
+    "no padding, no repetition. Answer in plain text only. Do not include image "
+    "or video links or media of any kind. "
+    "Hard content rules: if asked for pornographic or erotic content, refuse with "
+    "a short, polite refusal. If asked for hacking instructions of any kind — "
+    "exploits, malware, phishing, stealing wallets or seed phrases, or ways to "
+    "bypass security or access controls — refuse with a short, polite refusal. "
+    "If asked for how-to instructions for any other illegal activity, refuse the "
+    "same way. Teaching people to protect themselves stays allowed and welcome: "
+    "how to keep a wallet and seed phrase safe, how to spot scams and phishing, "
+    "and other defensive security education are fine."
+)
+
+def with_rules(messages):
+    """Append AI_RULES to the system message (creating one if absent).
+    Pure function — unit-testable without network, and never mutates the
+    caller's list."""
+    out = [dict(m) for m in messages]
+    for m in out:
+        if m.get("role") == "system":
+            m["content"] = m["content"] + "\n" + AI_RULES
+            return out
+    out.insert(0, {"role": "system", "content": AI_RULES})
+    return out
 
 DAILY_LIMIT_NOTE = ("⏳ Daily limit reached — be back soon! AI answers are paused "
                      "until more tokens come at midnight UTC. The bot still works "
@@ -35,12 +69,12 @@ def with_lang(messages, lang="en"):
 async def chat(messages, temperature=0.3, lang="en") -> str | None:
     if not AI_API_KEY:
         return None
-    messages = with_lang(messages, lang)
+    messages = with_rules(with_lang(messages, lang))
     # Daily pot: reserve the call's estimated cost first. A blocked call
     # returns None without spending anything; callers check
     # budget.exhausted() to tell the pot-empty note apart from other errors.
     # Token policy: minimized inputs (summary transcript ~10k chars) +
-    # 500 output tokens, under the 200,000/day pot (budget.py) matching the
+    # 250 output tokens, under the 200,000/day pot (budget.py) matching the
     # Groq free allowance. Data-command replies use no AI tokens at all —
     # only the AI paths call this module.
     estimate = budget.estimate_input(messages) + MAX_TOKENS
@@ -92,7 +126,7 @@ Format exactly:
 ❓ Unanswered Questions
 🔗 Links / Contracts / Proposals Mentioned (deduped, or 'None')
 📋 Action Items (with @name if named, or 'None')
-Be accurate, do not invent messages, contracts, or decisions not in the log. Keep it tight: short bullets, no filler, whole summary well under 500 tokens."""
+Be accurate, do not invent messages, contracts, or decisions not in the log. Keep it tight: short bullets, no filler, whole summary well under 250 tokens."""
 
 async def summarize(rows, detailed=False, kb_text="", lang="en") -> str:
     if not rows:
