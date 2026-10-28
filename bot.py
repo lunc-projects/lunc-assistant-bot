@@ -10,6 +10,10 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPer
 from telegram.constants import ParseMode
 from telegram.error import BadRequest
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, InlineQueryHandler, filters, ContextTypes
+try:
+    from telegram.ext import TypeHandler
+except Exception:  # test stubs / very old PTB: the usage observer just stays off
+    TypeHandler = None
 import store, ai_client, burn as burn_mod, chain, lang as lang_mod, ratelimit, budget, modquiz, topics, seclogic, alerts as alerts_mod, github_pr
 from kb import kb_as_text, find_kb_answer
 
@@ -142,18 +146,127 @@ async def send_long(update, text):
     for i in range(0, len(text), 3900):
         await update.effective_message.reply_text(text[i:i+3900])
 
+USAGE_HONESTY_NOTE = ("Counts are what the bot has actually seen since usage tracking began. "
+    "Telegram gives bots no list of their chats, so a group that never sends anything — and was "
+    "added before tracking started — stays invisible until it stirs.")
+
+def format_usage_report(counts, legacy, pot_spent, pot_budget, heading="📊 *LUNC Assistant — daily usage*"):
+    """Owner usage report — aggregate COUNTS ONLY (no group names, no
+    user names, ever). `counts` is store.registry_counts(); `legacy`
+    is the old log-based store.usage_counts(), kept as a clearly
+    labeled secondary line. Pot figures are a UTC-day estimate (the
+    pot resets at midnight UTC, the report day is America/New_York)."""
+    i = counts["interactions_today"]
+    return (
+        f"{heading} — {counts['day']} (America/New_York)\n"
+        f"Groups I'm in: {counts['groups_member']} confirmed"
+        f" · +{counts['groups_unknown']} known but unconfirmed"
+        f" · {counts['groups_left']} known to have removed me\n"
+        f"Groups active today: {counts['groups_active_today']} · New groups today: {counts['new_groups_today']}\n"
+        f"People known: {counts['people_total']} (DM: {counts['people_dm_total']} · groups: {counts['people_group_total']})\n"
+        f"People active today: {counts['people_active_today']} · New people today: {counts['new_people_today']}\n"
+        f"DM users active today: {counts['dm_active_today']}\n"
+        f"Interactions today: {counts['interactions_total']} "
+        f"(commands {i['command']} · messages {i['message']} · button taps {i['button']} · other {i['other']})\n"
+        f"Messages currently logged (7-day rolling): {counts['messages_logged']:,}\n"
+        f"AI pot today (UTC day, estimate): {pot_spent:,} / {pot_budget:,} tokens\n"
+        f"Older log-based view (7-day message log only): {legacy['groups']} groups with logged messages"
+        f" · {legacy['people_in_groups']} people in them · {legacy['dm_users']} DM users\n"
+        f"{USAGE_HONESTY_NOTE}")
+
 async def on_botstats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Owner-only usage counter (not in the public command list).
     if not OWNER_ID or update.effective_user.id != OWNER_ID:
         return
-    u = store.usage_counts()
-    await update.effective_message.reply_text(
-        "*Bot usage* (since the last deploy — the log resets on redeploys, 7-day rolling)\n"
-        f"Groups I'm in and logging: {u['groups']}\n"
-        f"People seen talking in those groups: {u['people_in_groups']}\n"
-        f"People who've used me in DM (settings/catchup): {u['dm_users']}\n"
-        f"Messages currently logged: {u['messages']}\n"
-        f"Daily AI pot used today (UTC): {budget.spent():,} / {budget.DAILY_TOKEN_BUDGET:,} estimated tokens", parse_mode=ParseMode.MARKDOWN)
+    text = format_usage_report(store.registry_counts(), store.usage_counts(),
+                               budget.spent(), budget.DAILY_TOKEN_BUDGET,
+                               heading="📊 *Bot usage*")
+    await update.effective_message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+def _classify_update(update):
+    """Broad interaction kind for the usage counters: command /
+    message / button (callback tap) / other. Pure + defensive so it
+    can be unit-tested on fake updates."""
+    try:
+        if getattr(update, "callback_query", None) is not None:
+            return "button"
+        msg = getattr(update, "message", None) or getattr(update, "edited_message", None)
+        if msg is not None:
+            text = getattr(msg, "text", None) or ""
+            for e in (getattr(msg, "entities", None) or []):
+                if getattr(e, "type", None) == "bot_command" and getattr(e, "offset", 0) == 0:
+                    return "command"
+            return "command" if text.startswith("/") else "message"
+    except Exception:
+        pass
+    return "other"
+
+async def on_observe_update(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Passive usage observer (group -1, runs before every handler).
+
+    Records ONLY metadata into the usage registry: which chat/user an
+    update came from, the broad interaction kind, and bot-membership
+    changes (my_chat_member). Never reads or stores message text or
+    names for the registry. Wrapped so it can NEVER break a real
+    handler: any failure is swallowed silently.
+    """
+    try:
+        chat = update.effective_chat
+        user = update.effective_user
+        is_member = None
+        mcm = getattr(update, "my_chat_member", None)
+        if mcm is not None:
+            new = getattr(mcm, "new_chat_member", None)
+            status = getattr(new, "status", None)
+            if status in ("member", "administrator"):
+                is_member = True
+            elif status in ("left", "kicked"):
+                is_member = False
+            elif status == "restricted":
+                is_member = bool(getattr(new, "is_member", False))
+        # Join/leave service messages: the chat stirred, but a member
+        # merely joining did not "use the bot" — count no user.
+        record_user = True
+        msg = getattr(update, "message", None)
+        if msg is not None and (getattr(msg, "new_chat_members", None) or getattr(msg, "left_chat_member", None)):
+            record_user = False
+        if user is not None and ctx is not None and getattr(ctx, "bot", None) is not None and user.id == ctx.bot.id:
+            return  # never count the bot itself
+        store.observe_update(
+            chat_id=chat.id if chat is not None else None,
+            chat_type=getattr(chat, "type", None) if chat is not None else None,
+            user_id=user.id if user is not None else None,
+            user_is_bot=bool(getattr(user, "is_bot", False)) if user is not None else False,
+            kind=_classify_update(update),
+            is_member=is_member,
+            record_user=record_user)
+    except Exception:
+        pass
+
+async def job_usage_report(ctx: ContextTypes.DEFAULT_TYPE):
+    """Owner daily usage DM at 7:00 PM America/New_York.
+
+    Runs every 15 minutes and self-heals: it sends only when the ET
+    clock is at/after 19:00 AND the persisted last-sent day is not
+    today, so a restart near 7 PM neither misses nor duplicates the
+    report. The last-sent marker is written only AFTER a successful
+    send, so a failed send retries on the next tick.
+    """
+    try:
+        if not OWNER_ID:
+            return
+        today = store.et_day()
+        now_et = datetime.datetime.now(store._ET)
+        if now_et.hour < 19:
+            return
+        if store.get_setting(0, "usage_report_day") == today:
+            return
+        text = format_usage_report(store.registry_counts(), store.usage_counts(),
+                                   budget.spent(), budget.DAILY_TOKEN_BUDGET)
+        await ctx.bot.send_message(OWNER_ID, text, parse_mode=ParseMode.MARKDOWN)
+        store.set_setting(0, "usage_report_day", today)
+    except Exception:
+        pass
 
 def user_lang(update):
     """The requester's language. Personal, never a group setting: one user
@@ -803,7 +916,7 @@ async def on_safety(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 PRIVACY_TEXT = (
     "🔒 *Privacy & security — what this bot does*\n\n"
     "• *It cannot move funds.* The bot has no wallet, no private keys, and no signing or sending code anywhere. Commands are read-only lookups and settings toggles — plus, only in groups that opted into protection (below), basic moderation actions.\n\n"
-    "• *What it logs:* in groups, message text is kept for 7 days so /summary and /catchup can work, then deleted automatically. Your rank counts the days you chat — commands don't count.\n\n"
+    "• *What it logs:* in groups, message text is kept for 7 days so /summary and /catchup can work, then deleted automatically. Your rank counts the days you chat — commands don't count. For the owner's usage stats it also keeps bare counts: chat and user IDs with first/last-seen times and daily totals (commands, messages, button taps) — no message text and no names in those stats, and only the owner can see them.\n\n"
     "• *What the AI sees:* only when someone uses an AI feature (/ask, /summary, mentions, DM summaries). Then the AI service (Groq) receives the message text and usernames needed for that one answer. Simple commands (/price, /validators, …) send nothing anywhere.\n\n"
     "• *Your group's controls:* group admins run this group — including AI on/off (/aioff, /aion), alert settings, and notification choices. Usage stats are owner-only.\n\n"
     "• *The limits:* everyone gets 1 AI question a day (a rank the owner sets by hand for a specific person can raise that person's own cap), moderators can AI-ban an abusive account from AI features only (simple commands keep working), and a hard daily token budget (200,000/day) means the AI quota can't be drained by spam — the worst case is AI pausing until midnight UTC.\n\n"
@@ -2603,6 +2716,10 @@ def main():
     if _proxy: _builder = _builder.proxy(_proxy).get_updates_proxy(_proxy)
     app = _builder.build()
     app.add_error_handler(on_error)
+    if TypeHandler is not None:
+        # Usage observer first (group -1): passive metadata counting
+        # for the owner's daily usage report. Never blocks handlers.
+        app.add_handler(TypeHandler(Update, on_observe_update), group=-1)
     app.add_handler(CommandHandler("start", on_start))
     app.add_handler(CommandHandler("botstats", on_botstats))
     app.add_handler(CommandHandler("help", on_help))
@@ -2703,6 +2820,7 @@ def main():
         app.job_queue.run_repeating(job_captcha_sweep, interval=60, first=30)
         app.job_queue.run_repeating(job_fresh_sweep, interval=600, first=90)
         app.job_queue.run_repeating(job_scam_alerts, interval=1800, first=300)
+        app.job_queue.run_repeating(job_usage_report, interval=900, first=420)  # owner daily usage DM, 7 PM ET (self-healing check inside)
         import datetime as _dt
         app.job_queue.run_daily(job_burn_daily, time=_dt.time(hour=1, minute=0))  # ~9pm ET (UTC-4), shifts 1h in winter
     print("LUNC Assistant Bot polling…")

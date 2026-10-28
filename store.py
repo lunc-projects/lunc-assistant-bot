@@ -17,6 +17,7 @@ def _conn():
         user_id INTEGER PRIMARY KEY, lang TEXT)""")
     _ensure_rank_tables(c)
     _ensure_mod_tables(c)
+    _ensure_usage(c)
     return c
 
 # --- Per-user language (personal choice: never a group setting) ---
@@ -684,3 +685,283 @@ def pr_set_state(repo, state_dict):
                  ON CONFLICT(repo) DO UPDATE SET state=excluded.state, updated=excluded.updated""",
               (repo, _json.dumps(state_dict), int(_time.time())))
     c.commit(); c.close()
+
+# --- Usage registry (2026-10-27, owner request: "how many people are
+# using it and how many groups it's in", with a daily update) ---
+# Persistent, METADATA-ONLY counting on the same /data SQLite DB.
+# What is stored: chat ids + chat TYPE, user ids, first/last-seen
+# timestamps, bot-membership state, per-day activity rows, and daily
+# interaction counters by broad kind (command / message / button /
+# other). What is NEVER stored here: message text, user names,
+# usernames, chat titles. Counts only — the owner report and /botstats
+# show aggregates, never names.
+#
+# Honesty rules (the report wording repeats them):
+# - Telegram gives a bot NO way to enumerate its chats or subscribers.
+#   The registry only knows what the bot has actually SEEN: a group
+#   that never sends anything and predates tracking stays invisible
+#   until it stirs.
+# - The registry was seeded once from pre-existing DB evidence (see
+#   _seed_usage). Seeded rows are flagged seeded=1 and are NEVER
+#   reported as "new today" — they existed before tracking; only
+#   their earliest genuine evidence timestamps (e.g. the message log)
+#   are kept. Seeded chats start is_member=NULL (unknown): a past
+#   sighting does not prove the bot is still in the group.
+# - "Active today" counts only live observations since tracking
+#   began, on America/New_York calendar days.
+
+import datetime as _dt
+try:
+    from zoneinfo import ZoneInfo as _ZoneInfo
+    _ET = _ZoneInfo("America/New_York")
+except Exception:  # no tzdata: fixed EST offset (report hour may drift 1h in DST)
+    _ET = _dt.timezone(_dt.timedelta(hours=-5))
+
+USAGE_KINDS = ("command", "message", "button", "other")
+_usage_ready = False
+
+def et_day(ts=None):
+    """America/New_York calendar day (YYYY-MM-DD) for a unix ts."""
+    return _dt.datetime.fromtimestamp(int(ts if ts is not None else time.time()), _ET).strftime("%Y-%m-%d")
+
+def _et_bounds(day):
+    """(start_ts, end_ts) unix bounds of one America/New_York day."""
+    d = _dt.datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=_ET)
+    return int(d.timestamp()), int((d + _dt.timedelta(days=1)).timestamp())
+
+def _ensure_usage_tables(c):
+    c.execute("""CREATE TABLE IF NOT EXISTS usage_chats(
+        chat_id INTEGER PRIMARY KEY, chat_type TEXT,
+        first_seen_ts INTEGER, last_seen_ts INTEGER,
+        is_member INTEGER, seeded INTEGER DEFAULT 0)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS usage_users(
+        user_id INTEGER PRIMARY KEY,
+        first_seen_ts INTEGER, last_seen_ts INTEGER,
+        first_seen_dm_ts INTEGER, last_seen_dm_ts INTEGER,
+        first_seen_group_ts INTEGER, last_seen_group_ts INTEGER,
+        seeded INTEGER DEFAULT 0)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS usage_sightings(
+        chat_id INTEGER, user_id INTEGER, day TEXT,
+        PRIMARY KEY(chat_id, user_id, day))""")
+    c.execute("""CREATE TABLE IF NOT EXISTS usage_chat_days(
+        chat_id INTEGER, day TEXT, PRIMARY KEY(chat_id, day))""")
+    c.execute("""CREATE TABLE IF NOT EXISTS usage_user_days(
+        user_id INTEGER, day TEXT, PRIMARY KEY(user_id, day))""")
+    c.execute("""CREATE TABLE IF NOT EXISTS usage_interactions(
+        day TEXT, kind TEXT, count INTEGER DEFAULT 0,
+        PRIMARY KEY(day, kind))""")
+    c.execute("""CREATE TABLE IF NOT EXISTS usage_meta(
+        key TEXT PRIMARY KEY, value TEXT)""")
+
+def _ensure_usage(c):
+    global _usage_ready
+    _ensure_usage_tables(c)
+    if _usage_ready:
+        return
+    _usage_ready = True
+    r = c.execute("SELECT value FROM usage_meta WHERE key='seeded'").fetchone()
+    if r is None:
+        _seed_usage(c)
+        c.execute("INSERT INTO usage_meta(key, value) VALUES('seeded', ?)",
+                  (str(int(time.time())),))
+    c.commit()
+
+def _chat_upsert(c, chat_id, chat_type, first, last, is_member, seeded):
+    c.execute("""INSERT INTO usage_chats(chat_id, chat_type, first_seen_ts, last_seen_ts, is_member, seeded)
+                 VALUES(?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(chat_id) DO UPDATE SET
+                   chat_type = COALESCE(excluded.chat_type, usage_chats.chat_type),
+                   first_seen_ts = MIN(usage_chats.first_seen_ts, excluded.first_seen_ts),
+                   last_seen_ts = MAX(usage_chats.last_seen_ts, excluded.last_seen_ts),
+                   is_member = COALESCE(excluded.is_member, usage_chats.is_member)""",
+              (int(chat_id), chat_type, int(first), int(last),
+               None if is_member is None else (1 if is_member else 0), int(seeded)))
+
+def _user_upsert(c, user_id, first, last, dm=None, grp=None, seeded=0):
+    dmf, dml = dm if dm else (None, None)
+    grf, grl = grp if grp else (None, None)
+    c.execute("""INSERT INTO usage_users(user_id, first_seen_ts, last_seen_ts,
+                   first_seen_dm_ts, last_seen_dm_ts, first_seen_group_ts, last_seen_group_ts, seeded)
+                 VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(user_id) DO UPDATE SET
+                   first_seen_ts = MIN(usage_users.first_seen_ts, excluded.first_seen_ts),
+                   last_seen_ts = MAX(usage_users.last_seen_ts, excluded.last_seen_ts),
+                   first_seen_dm_ts = CASE
+                     WHEN usage_users.first_seen_dm_ts IS NULL THEN excluded.first_seen_dm_ts
+                     WHEN excluded.first_seen_dm_ts IS NULL THEN usage_users.first_seen_dm_ts
+                     ELSE MIN(usage_users.first_seen_dm_ts, excluded.first_seen_dm_ts) END,
+                   last_seen_dm_ts = CASE
+                     WHEN usage_users.last_seen_dm_ts IS NULL THEN excluded.last_seen_dm_ts
+                     WHEN excluded.last_seen_dm_ts IS NULL THEN usage_users.last_seen_dm_ts
+                     ELSE MAX(usage_users.last_seen_dm_ts, excluded.last_seen_dm_ts) END,
+                   first_seen_group_ts = CASE
+                     WHEN usage_users.first_seen_group_ts IS NULL THEN excluded.first_seen_group_ts
+                     WHEN excluded.first_seen_group_ts IS NULL THEN usage_users.first_seen_group_ts
+                     ELSE MIN(usage_users.first_seen_group_ts, excluded.first_seen_group_ts) END,
+                   last_seen_group_ts = CASE
+                     WHEN usage_users.last_seen_group_ts IS NULL THEN excluded.last_seen_group_ts
+                     WHEN excluded.last_seen_group_ts IS NULL THEN usage_users.last_seen_group_ts
+                     ELSE MAX(usage_users.last_seen_group_ts, excluded.last_seen_group_ts) END""",
+              (int(user_id), int(first), int(last), dmf, dml, grf, grl, int(seeded)))
+
+def _seed_usage(c):
+    """One-time conservative seed from evidence already in this DB.
+
+    Sources (what each genuinely proves):
+    - messages: the chat existed and the user spoke there at ts
+      (earliest real timestamps we have; chats keep type by id sign).
+    - mod_groups / members_verified (ts): chat + user were there at ts.
+    - rank_override (ts): user active in that group at ts.
+    - gbans / ai_bans / elevated_users (ts): the user existed by ts.
+    - chat_settings / catchup / watched_validators / faq /
+      pr_subscriptions / rank_days / first_msg_seen / captcha_pending /
+      fresh_holds / user_lang: id-only evidence, no timestamp — seeded
+      at seed time and flagged, so they never count as "new".
+    Membership is NEVER seeded as known: every seeded chat starts
+    is_member=NULL (unknown) and only a live update confirms it.
+    """
+    now = int(time.time())
+    chats, users = {}, {}
+
+    def see_chat(cid, first=None, last=None):
+        if cid is None: return
+        cid = int(cid)
+        e = chats.setdefault(cid, {"first": None, "last": None})
+        if first is not None: e["first"] = first if e["first"] is None else min(e["first"], first)
+        if last is not None: e["last"] = last if e["last"] is None else max(e["last"], last)
+
+    def see_user(uid, first=None, last=None, dm=None, grp=None):
+        if uid is None: return
+        uid = int(uid)
+        e = users.setdefault(uid, {"first": None, "last": None, "dmf": None, "dml": None, "grf": None, "grl": None})
+        if first is not None: e["first"] = first if e["first"] is None else min(e["first"], first)
+        if last is not None: e["last"] = last if e["last"] is None else max(e["last"], last)
+        if dm is not None:
+            e["dmf"] = dm[0] if e["dmf"] is None else min(e["dmf"], dm[0])
+            e["dml"] = dm[1] if e["dml"] is None else max(e["dml"], dm[1])
+        if grp is not None:
+            e["grf"] = grp[0] if e["grf"] is None else min(e["grf"], grp[0])
+            e["grl"] = grp[1] if e["grl"] is None else max(e["grl"], grp[1])
+
+    for r in c.execute("SELECT chat_id, MIN(ts) f, MAX(ts) l FROM messages GROUP BY chat_id"):
+        see_chat(r["chat_id"], r["f"], r["l"])
+    for r in c.execute("""SELECT user_id, chat_id, MIN(ts) f, MAX(ts) l FROM messages
+                          WHERE user_id IS NOT NULL GROUP BY user_id, chat_id"""):
+        if r["chat_id"] and r["chat_id"] > 0:
+            see_user(r["user_id"], r["f"], r["l"], dm=(r["f"], r["l"]))
+        else:
+            see_user(r["user_id"], r["f"], r["l"], grp=(r["f"], r["l"]))
+    for r in c.execute("SELECT chat_id, ts FROM mod_groups"):
+        see_chat(r["chat_id"], r["ts"], r["ts"])
+    for r in c.execute("SELECT chat_id, user_id, ts FROM members_verified"):
+        see_chat(r["chat_id"], r["ts"], r["ts"]); see_user(r["user_id"], r["ts"], r["ts"], grp=(r["ts"], r["ts"]))
+    for r in c.execute("SELECT chat_id, user_id, ts FROM rank_override"):
+        see_chat(r["chat_id"], r["ts"], r["ts"]); see_user(r["user_id"], r["ts"], r["ts"], grp=(r["ts"], r["ts"]))
+    for tbl in ("gbans", "ai_bans", "elevated_users"):
+        for r in c.execute(f"SELECT user_id, ts FROM {tbl}"):
+            see_user(r["user_id"], r["ts"], r["ts"])
+    for r in c.execute("SELECT DISTINCT chat_id FROM chat_settings"):
+        see_chat(r["chat_id"], now, now)
+    for r in c.execute("SELECT chat_id, user_id FROM catchup"):
+        see_chat(r["chat_id"], now, now)
+        if r["chat_id"] and r["chat_id"] > 0: see_user(r["user_id"], now, now, dm=(now, now))
+        else: see_user(r["user_id"], now, now, grp=(now, now))
+    for r in c.execute("SELECT chat_id, user_id FROM rank_days"):
+        see_chat(r["chat_id"], now, now); see_user(r["user_id"], now, now, grp=(now, now))
+    for tbl in ("first_msg_seen", "captcha_pending", "fresh_holds"):
+        for r in c.execute(f"SELECT chat_id, user_id FROM {tbl}"):
+            see_chat(r["chat_id"], now, now); see_user(r["user_id"], now, now, grp=(now, now))
+    for r in c.execute("SELECT user_id FROM user_lang"):
+        see_user(r["user_id"], now, now)
+    _ensure_val_table(c)
+    for r in c.execute("SELECT DISTINCT chat_id FROM watched_validators"):
+        see_chat(r["chat_id"], now, now)
+    for r in c.execute("SELECT DISTINCT chat_id FROM faq"):
+        see_chat(r["chat_id"], now, now)
+    _ensure_pr_tables(c)
+    for r in c.execute("SELECT DISTINCT chat_id FROM pr_subscriptions"):
+        see_chat(r["chat_id"], now, now)
+
+    for cid, e in chats.items():
+        _chat_upsert(c, cid, "group" if cid < 0 else "private",
+                     e["first"] or now, e["last"] or now, None, seeded=1)
+    for uid, e in users.items():
+        _user_upsert(c, uid, e["first"] or now, e["last"] or now,
+                     dm=(e["dmf"], e["dml"]) if e["dmf"] is not None else None,
+                     grp=(e["grf"], e["grl"]) if e["grf"] is not None else None,
+                     seeded=1)
+
+def note_membership(chat_id, is_member, chat_type=None, ts=None):
+    """Record a bot-membership change (from my_chat_member updates)."""
+    ts = int(ts if ts is not None else time.time())
+    c = _conn()
+    _chat_upsert(c, chat_id, chat_type, ts, ts, is_member, seeded=0)
+    c.commit(); c.close()
+
+def observe_update(chat_id=None, chat_type=None, user_id=None, user_is_bot=False,
+                   kind=None, is_member=None, record_user=True, ts=None):
+    """One passive sighting from a live update. Metadata only.
+
+    A live group/channel update proves the bot is currently a member
+    (is_member set True unless an explicit membership value is given);
+    private chats carry no membership state. Bot accounts are never
+    counted as people. record_user=False is for pure service events
+    (e.g. someone joining a group): the chat stirred, but the person
+    did not use the bot, so no user sighting is recorded.
+    """
+    ts = int(ts if ts is not None else time.time())
+    day = et_day(ts)
+    c = _conn()
+    if chat_id is not None:
+        member = is_member
+        if member is None and chat_type in ("group", "supergroup", "channel"):
+            member = True
+        _chat_upsert(c, chat_id, chat_type, ts, ts, member, seeded=0)
+        if int(chat_id) < 0:
+            c.execute("INSERT OR IGNORE INTO usage_chat_days(chat_id, day) VALUES(?, ?)", (int(chat_id), day))
+    if user_id is not None and not user_is_bot and record_user:
+        dm = (ts, ts) if chat_type == "private" else None
+        grp = (ts, ts) if chat_type in ("group", "supergroup", "channel") else None
+        _user_upsert(c, user_id, ts, ts, dm=dm, grp=grp, seeded=0)
+        c.execute("INSERT OR IGNORE INTO usage_user_days(user_id, day) VALUES(?, ?)", (int(user_id), day))
+        if chat_id is not None:
+            c.execute("INSERT OR IGNORE INTO usage_sightings(chat_id, user_id, day) VALUES(?, ?, ?)",
+                      (int(chat_id), int(user_id), day))
+    if kind in USAGE_KINDS:
+        c.execute("""INSERT INTO usage_interactions(day, kind, count) VALUES(?, ?, 1)
+                     ON CONFLICT(day, kind) DO UPDATE SET count = count + 1""", (day, kind))
+    c.commit(); c.close()
+
+def registry_counts(day=None):
+    """Aggregate usage numbers for one America/New_York day (default today)."""
+    day = day or et_day()
+    start, end = _et_bounds(day)
+    c = _conn()
+    def q(sql, args=()):
+        return c.execute(sql, args).fetchone()[0]
+    inter = {k: 0 for k in USAGE_KINDS}
+    for r in c.execute("SELECT kind, count FROM usage_interactions WHERE day=?", (day,)):
+        inter[r["kind"]] = r["count"]
+    out = {
+        "day": day,
+        "groups_member": q("SELECT COUNT(*) FROM usage_chats WHERE chat_id < 0 AND is_member = 1"),
+        "groups_unknown": q("SELECT COUNT(*) FROM usage_chats WHERE chat_id < 0 AND is_member IS NULL"),
+        "groups_left": q("SELECT COUNT(*) FROM usage_chats WHERE chat_id < 0 AND is_member = 0"),
+        "groups_active_today": q("SELECT COUNT(DISTINCT chat_id) FROM usage_chat_days WHERE day=?", (day,)),
+        "new_groups_today": q("""SELECT COUNT(*) FROM usage_chats
+                                 WHERE chat_id < 0 AND seeded = 0 AND first_seen_ts >= ? AND first_seen_ts < ?""",
+                              (start, end)),
+        "people_total": q("SELECT COUNT(*) FROM usage_users"),
+        "people_dm_total": q("SELECT COUNT(*) FROM usage_users WHERE first_seen_dm_ts IS NOT NULL"),
+        "people_group_total": q("SELECT COUNT(*) FROM usage_users WHERE first_seen_group_ts IS NOT NULL"),
+        "people_active_today": q("SELECT COUNT(DISTINCT user_id) FROM usage_user_days WHERE day=?", (day,)),
+        "dm_active_today": q("SELECT COUNT(DISTINCT user_id) FROM usage_sightings WHERE day=? AND chat_id > 0", (day,)),
+        "new_people_today": q("""SELECT COUNT(*) FROM usage_users
+                                 WHERE seeded = 0 AND first_seen_ts >= ? AND first_seen_ts < ?""",
+                              (start, end)),
+        "interactions_today": inter,
+        "interactions_total": sum(inter.values()),
+        "messages_logged": q("SELECT COUNT(*) FROM messages"),
+    }
+    c.close()
+    return out
