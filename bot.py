@@ -556,10 +556,13 @@ async def on_tldr(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     if not await ai_guard(update): return
     out = await ai_client.chat([
-        {"role":"system","content":"Summarize the message in 2-3 short lines. No extra commentary."},
+        {"role":"system","content":"Summarize the message in 2-3 short lines. No extra commentary. Refer to people by plain display name only — never write @usernames."},
         {"role":"user","content": msg.text}], lang=user_lang(update))
     if not out:
         out = ai_client.DAILY_LIMIT_NOTE if budget.exhausted() else msg.text[:400]
+    # Summary-family output: strip live @mentions so a TL;DR never re-tags
+    # anyone named in the original message (owner decision 2026-10-28).
+    out = ai_client.strip_mentions(out)
     await update.effective_message.reply_text(f"⚡ TL;DR: {out}")
 
 async def on_ask(update: Update, ctx: ContextTypes.DEFAULT_TYPE):

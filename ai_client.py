@@ -66,6 +66,22 @@ def with_lang(messages, lang="en"):
     out.insert(0, {"role": "system", "content": extra})
     return out
 
+# Matches a Telegram handle at the start of a token: "@" NOT preceded by a
+# word character (so start-of-string, whitespace, and opening punctuation
+# all count, while the "@" inside an email address — preceded by a word
+# character — is left alone), followed by 3+ handle characters.
+_MENTION_RE = re.compile(r"(?<![A-Za-z0-9_])@([A-Za-z0-9_]{3,})")
+
+def strip_mentions(text: str) -> str:
+    """Remove the "@" from Telegram handles, leaving the bare name
+    ("@steve_b" -> "steve_b"). Summary-family output only (owner decision
+    2026-10-28): a summary that writes @name re-tags/pings that person in
+    the group, so summaries must never carry a live mention. Email
+    addresses are untouched. Pure function — unit-testable."""
+    if not text:
+        return text
+    return _MENTION_RE.sub(r"\1", text)
+
 async def chat(messages, temperature=0.3, lang="en") -> str | None:
     if not AI_API_KEY:
         return None
@@ -116,17 +132,16 @@ def extractive_summary(rows, detailed=False) -> str:
         if t: lines.append(f"• {r['user_name']}: {t}")
     if not AI_API_KEY:
         lines.append("\nℹ️ Add AI_API_KEY in Railway for full AI summaries — this is the no-key fallback view.")
-    return "\n".join(lines)
+    # Summary-family output: never ship a live @mention (re-tags the person).
+    return strip_mentions("\n".join(lines))
 
-SUMMARY_SYSTEM = """You are LUNC Assistant Bot. Summarize Telegram group messages into a quick, scannable summary.
-Format exactly:
-⚡ TL;DR (3 lines max)
-📌 Key Topics (bullets, who raised what matters)
-✅ Decisions Made (or 'None clear')
-❓ Unanswered Questions
-🔗 Links / Contracts / Proposals Mentioned (deduped, or 'None')
-📋 Action Items (with @name if named, or 'None')
-Be accurate, do not invent messages, contracts, or decisions not in the log. Keep it tight: short bullets, no filler, whole summary well under 250 tokens."""
+SUMMARY_SYSTEM = """You are LUNC Assistant Bot. Summarize Telegram group messages into a SHORT, scannable summary.
+Hard limits: at most 5 short lines and about 450 characters total. Key points only — no intro, no outro, no padding.
+Format:
+⚡ TL;DR — one line.
+Then up to 4 bullets (•) covering the key points: what mattered, what was decided, what is still open. Fold any links or proposals into the bullet they belong to.
+Names: refer to people by plain display name only. NEVER write @usernames — an @name re-notifies that person.
+Be accurate, do not invent messages, contracts, or decisions not in the log. If a point must be cut to fit, cut words per point, not a whole main topic."""
 
 async def summarize(rows, detailed=False, kb_text="", lang="en") -> str:
     if not rows:
@@ -137,10 +152,14 @@ async def summarize(rows, detailed=False, kb_text="", lang="en") -> str:
     # covers a busy group)
     transcript = transcript[-TRANSCRIPT_CHARS:]
     out = await chat([
-        {"role": "system", "content": SUMMARY_SYSTEM + ("\nGive more detail per topic." if detailed else "")},
+        {"role": "system", "content": SUMMARY_SYSTEM + ("\nA little more detail per point is OK, but stay under about 8 short lines." if detailed else "")},
         {"role": "user", "content": f"Summarize these {len(rows)} messages:\n\n{transcript}"},
     ], lang=lang)
     if out is None and budget.exhausted():
         # Pot empty: the bot still works — basic summary plus the note.
         return extractive_summary(rows, detailed) + "\n\n" + DAILY_LIMIT_NOTE
-    return out or extractive_summary(rows, detailed)
+    if out:
+        # The deterministic guarantee behind the prompt rule: no summary
+        # leaves with a live @mention, whatever the model wrote.
+        return strip_mentions(out)
+    return extractive_summary(rows, detailed)

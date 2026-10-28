@@ -116,8 +116,11 @@ def check(cond, msg):
 
 print("== smaller answers ==")
 check(ai_client.MAX_TOKENS == 250, "MAX_TOKENS is 250 (was 500)")
-check("well under 250 tokens" in ai_client.SUMMARY_SYSTEM,
-      "summary prompt targets the 250-token budget")
+check("about 450 characters" in ai_client.SUMMARY_SYSTEM
+      and "at most 5 short lines" in ai_client.SUMMARY_SYSTEM,
+      "summary prompt caps summaries at ~5 short lines / ~450 characters")
+check("NEVER write @usernames" in ai_client.SUMMARY_SYSTEM,
+      "summary prompt forbids @usernames (no re-tagging)")
 
 print("== rules ride on every AI call ==")
 check("with_rules" in inspect.getsource(ai_client.chat),
