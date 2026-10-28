@@ -524,7 +524,7 @@ async def on_calc(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         # Estimate only: bonded ratio method is complex on-chain; use a clearly-labelled range via supply inflation proxy is unreliable,
         # so present a simple scenario table instead of a fake precise APR.
         lines = [f"🧮 *Reward ESTIMATE for {amt:,.0f} LUNC over 1 year* (before validator commission, not a promise):"]
-        for apr in (5, 10, 15, 20):
+        for apr in (2, 3.5, 5, 7):
             lines.append(f"• At {apr}% APR: ~{amt*apr/100:,.0f} LUNC")
         lines.append("Actual APR moves with staking ratio, tax, and commission — check your wallet app for the live rate before staking.")
         await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
