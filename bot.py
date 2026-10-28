@@ -14,7 +14,7 @@ try:
     from telegram.ext import TypeHandler
 except Exception:  # test stubs / very old PTB: the usage observer just stays off
     TypeHandler = None
-import store, ai_client, burn as burn_mod, chain, lang as lang_mod, ratelimit, budget, modquiz, topics, seclogic, alerts as alerts_mod, github_pr
+import store, ai_client, burn as burn_mod, chain, lang as lang_mod, ratelimit, budget, modquiz, topics, seclogic, alerts as alerts_mod, github_pr, stats_report
 from kb import kb_as_text, find_kb_answer
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -156,9 +156,16 @@ def format_usage_report(counts, legacy, pot_spent, pot_budget, heading="📊 *LU
     is the old log-based store.usage_counts(), kept as a clearly
     labeled secondary line. Pot figures are a UTC-day estimate (the
     pot resets at midnight UTC, the report day is America/New_York)."""
+    return (f"{heading} — {counts['day']} (America/New_York)\n"
+            + _usage_lines(counts, legacy, pot_spent, pot_budget)
+            + f"\n{USAGE_HONESTY_NOTE}")
+
+
+def _usage_lines(counts, legacy, pot_spent, pot_budget):
+    """The LUNC section body (no heading, no closing note), shared by
+    the solo report and the combined all-bots report."""
     i = counts["interactions_today"]
     return (
-        f"{heading} — {counts['day']} (America/New_York)\n"
         f"Groups I'm in: {counts['groups_member']} confirmed"
         f" · +{counts['groups_unknown']} known but unconfirmed"
         f" · {counts['groups_left']} known to have removed me\n"
@@ -171,8 +178,55 @@ def format_usage_report(counts, legacy, pot_spent, pot_budget, heading="📊 *LU
         f"Messages currently logged (7-day rolling): {counts['messages_logged']:,}\n"
         f"AI pot today (UTC day, estimate): {pot_spent:,} / {pot_budget:,} tokens\n"
         f"Older log-based view (7-day message log only): {legacy['groups']} groups with logged messages"
-        f" · {legacy['people_in_groups']} people in them · {legacy['dm_users']} DM users\n"
-        f"{USAGE_HONESTY_NOTE}")
+        f" · {legacy['people_in_groups']} people in them · {legacy['dm_users']} DM users")
+
+OTHER_BOTS = (("garuda", "Garuda Assistant"),
+              ("professor", "Professor Crypto"),
+              ("do", "DO Chain Assistant"))
+
+
+def _other_bot_section(name, title, payload, now_ts):
+    """One bot's section of the combined report. Fresh payload (<=26h)
+    -> its counts with an 'as of' time. Stale or missing -> the honest
+    'no fresh report' line; numbers are NEVER invented."""
+    if payload and stats_report.is_fresh(payload, now_ts):
+        head = f"*{title}* — as of {stats_report.fmt_ts_et(payload.get('ts'))}\n"
+        if name == "garuda":
+            return (head
+                    + f"Groups I'm in and logging: {payload.get('groups_logging', 0)} · "
+                      f"People seen talking in those groups: {payload.get('people_in_groups', 0)} · "
+                      f"DM users: {payload.get('dm_users', 0)}\n"
+                    + f"Messages currently logged: {payload.get('messages_logged', 0):,}\n"
+                    + f"AI pot today (UTC day, estimate): {payload.get('pot_spent', 0):,} / {payload.get('pot_budget', 0):,} tokens")
+        if name == "professor":
+            return (head
+                    + f"Groups I'm serving: {payload.get('groups_serving', 0)}\n"
+                    + f"Group questions answered today (UTC): {payload.get('group_questions_today', 0)}\n"
+                    + f"People who've asked me in DM today (UTC, since its last restart): {payload.get('dm_askers_today', 0)}")
+        return (head
+                + f"Groups I'm in and logging: {payload.get('groups_logging', 0)} · "
+                  f"People seen talking in those groups: {payload.get('people_in_groups', 0)} · "
+                  f"DM users: {payload.get('dm_users', 0)}\n"
+                + f"Messages currently logged: {payload.get('messages_logged', 0):,}")
+    last = stats_report.fmt_ts_et(payload.get("ts")) if payload else "never"
+    return f"*{title}*\nNo fresh report — last seen {last}"
+
+
+def format_combined_report(counts, legacy, pot_spent, pot_budget, others, now_ts=None):
+    """The ONE daily report covering all four assistant bots (Steve's
+    ruling 2026-10-27). This bot's section is counted live; the other
+    sections come from their published stats_report payloads."""
+    now_ts = int(now_ts if now_ts is not None else time.time())
+    parts = [
+        f"📊 *Daily usage — all bots* — {counts['day']} (America/New_York)",
+        "*LUNC Assistant* (counted live here)\n"
+        + _usage_lines(counts, legacy, pot_spent, pot_budget),
+    ]
+    for name, title in OTHER_BOTS:
+        parts.append(_other_bot_section(name, title, others.get(name), now_ts))
+    parts.append(USAGE_HONESTY_NOTE)
+    return "\n\n".join(parts)
+
 
 async def on_botstats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Owner-only usage counter (not in the public command list).
@@ -261,12 +315,30 @@ async def job_usage_report(ctx: ContextTypes.DEFAULT_TYPE):
             return
         if store.get_setting(0, "usage_report_day") == today:
             return
-        text = format_usage_report(store.registry_counts(), store.usage_counts(),
-                                   budget.spent(), budget.DAILY_TOKEN_BUDGET)
+        counts = store.registry_counts()
+        legacy = store.usage_counts()
+        pot_spent, pot_budget = budget.spent(), budget.DAILY_TOKEN_BUDGET
+        text = None
+        if stats_report.configured():
+            try:
+                others = {}
+                for name, _title in OTHER_BOTS:
+                    others[name] = await stats_report.read_bot(name)
+                text = format_combined_report(counts, legacy, pot_spent, pot_budget, others)
+            except Exception:
+                text = None  # reads failed entirely -> solo fallback below
+        if text is None:
+            text = format_usage_report(counts, legacy, pot_spent, pot_budget)
         await ctx.bot.send_message(OWNER_ID, text, parse_mode=ParseMode.MARKDOWN)
         store.set_setting(0, "usage_report_day", today)
     except Exception:
         pass
+
+
+async def job_stats_publish(ctx: ContextTypes.DEFAULT_TYPE):
+    """Publish this bot's counts to the shared stats DB every ~30 min
+    (silent no-op until UPSTASH_STATS_* is configured)."""
+    await stats_report.publish()
 
 def user_lang(update):
     """The requester's language. Personal, never a group setting: one user
@@ -2821,6 +2893,7 @@ def main():
         app.job_queue.run_repeating(job_fresh_sweep, interval=600, first=90)
         app.job_queue.run_repeating(job_scam_alerts, interval=1800, first=300)
         app.job_queue.run_repeating(job_usage_report, interval=900, first=420)  # owner daily usage DM, 7 PM ET (self-healing check inside)
+        app.job_queue.run_repeating(job_stats_publish, interval=1800, first=300)  # publish own counts for the combined report
         import datetime as _dt
         app.job_queue.run_daily(job_burn_daily, time=_dt.time(hour=1, minute=0))  # ~9pm ET (UTC-4), shifts 1h in winter
     print("LUNC Assistant Bot polling…")

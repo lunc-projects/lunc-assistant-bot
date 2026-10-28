@@ -296,6 +296,76 @@ finally:
 check("daily job sent exactly once", len(sent) == 1 and sent[0][0] == 999)
 check("daily job persisted its last-sent day", store.get_setting(0, "usage_report_day") == "2026-10-27")
 
+# ============ Combined all-bots report (Steve's ruling 2026-10-27) ============
+_now = int(real_dt.datetime.now().timestamp())
+_garuda_fresh = {"bot": "garuda", "ts": _now, "groups_logging": 3, "people_in_groups": 40,
+                 "dm_users": 6, "messages_logged": 900, "pot_spent": 100, "pot_budget": 200000}
+_prof_fresh = {"bot": "professor", "ts": _now, "groups_serving": 4,
+               "group_questions_today": 6, "dm_askers_today": 2}
+_do_fresh = {"bot": "do", "ts": _now, "groups_logging": 2, "people_in_groups": 30,
+             "dm_users": 5, "messages_logged": 700}
+
+combined = bot.format_combined_report(fixed, legacy, 12340, 200000,
+                                      {"garuda": _garuda_fresh, "professor": _prof_fresh,
+                                       "do": _do_fresh}, now_ts=_now)
+check("combined: header covers all bots", "Daily usage — all bots" in combined)
+check("combined: LUNC section counted live", "*LUNC Assistant*" in combined and "Groups I'm in: 12 confirmed" in combined)
+check("combined: garuda counts + as-of", "*Garuda Assistant* — as of" in combined and "People seen talking in those groups: 40" in combined)
+check("combined: professor counts", "Groups I'm serving: 4" in combined and "DM today (UTC, since its last restart): 2" in combined)
+check("combined: do counts", "*DO Chain Assistant* — as of" in combined and "Messages currently logged: 700" in combined)
+check("combined: no stale lines when all fresh", "No fresh report" not in combined)
+check("combined: contains NO names/usernames", "@" not in combined)
+
+mixed = bot.format_combined_report(fixed, legacy, 12340, 200000,
+                                   {"garuda": dict(_garuda_fresh, ts=_now - 27 * 3600),
+                                    "professor": None, "do": _do_fresh}, now_ts=_now)
+check("combined: stale + missing bots each get the honest line", mixed.count("No fresh report") == 2)
+check("combined: missing bot says last seen never", "No fresh report — last seen never" in mixed)
+check("combined: fresh bot still shows counts in mixed", "Messages currently logged: 700" in mixed)
+
+# Job-level: configured + reads OK -> combined DM; reads raise -> solo fallback.
+_sent2 = []
+
+
+class _FakeBot2(_FakeBot):
+    async def send_message(self, chat_id, text, parse_mode=None):
+        _sent2.append((chat_id, text))
+
+
+async def _fake_read_ok(name):
+    return {"garuda": _garuda_fresh, "professor": _prof_fresh, "do": _do_fresh}[name]
+
+
+async def _fake_read_boom(name):
+    raise RuntimeError("upstash unreachable")
+
+
+_sr = bot.stats_report
+_real_read_bot = _sr.read_bot
+os.environ["UPSTASH_STATS_URL"] = "https://stats.example.test"
+os.environ["UPSTASH_STATS_TOKEN"] = "tok123"
+bot.datetime = types.SimpleNamespace(datetime=_FakeDateTime, timezone=real_dt.timezone, timedelta=real_dt.timedelta)
+store.et_day = lambda ts=None: "2026-10-27"
+bot.OWNER_ID = 999
+try:
+    _sr.read_bot = _fake_read_ok
+    store.set_setting(0, "usage_report_day", "")
+    asyncio.run(bot.job_usage_report(NS(bot=_FakeBot2())))
+    check("job sends the COMBINED report when reads work",
+          len(_sent2) == 1 and "Daily usage — all bots" in _sent2[0][1])
+    _sr.read_bot = _fake_read_boom
+    store.set_setting(0, "usage_report_day", "")
+    asyncio.run(bot.job_usage_report(NS(bot=_FakeBot2())))
+    check("job falls back to the SOLO report when reads fail entirely",
+          len(_sent2) == 2 and "LUNC Assistant — daily usage" in _sent2[1][1]
+          and "all bots" not in _sent2[1][1])
+finally:
+    _sr.read_bot = _real_read_bot
+    os.environ.pop("UPSTASH_STATS_URL", None)
+    os.environ.pop("UPSTASH_STATS_TOKEN", None)
+    bot.datetime = _real_bot_dt
+    store.et_day = _real_et_day
+
 print()
 print("FAILURES:", fails if fails else "none")
 sys.exit(1 if fails else 0)
