@@ -87,6 +87,7 @@ Automatic in protected groups: message flooding = delete + timed mute · the sam
 Edits and photo/video captions are checked the same way — post clean and swap in a scam link afterwards, and it's treated like posting it. The safety check allows 3 wrong answers before it removes you (you can rejoin and try again)
 /mute [minutes] — reply to a member to silence them (default 60 min) · /unmute
 /blacklist add <word> — in protected groups, a message containing it is deleted and the sender removed (owner + elevated users)
+/muteword add <phrase> — this group only (works with or without protection): a message containing the phrase is deleted and the sender muted 24h · /muteword remove <phrase> · /muteword list (group admins)
 /raid on/off — anti-raid lockdown for join surges (also triggers automatically)
 /scamalerts on/off — this protected group gets a safety reminder every ~6 hours (group admins)
 /banstats — the protection numbers
@@ -1476,6 +1477,106 @@ async def on_blacklist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     words = store.blacklist_all()
     await update.effective_message.reply_text("Word blacklist: " + (", ".join(words) if words else "(empty)") + "\nAdd: /blacklist add <word> · Remove: /blacklist remove <word>")
 
+# --- Per-group phrase filter: delete + 24h mute (2026-10-27) ---
+# Command is /muteword (NOT /filter: Rose, the FRG group's existing
+# management bot, already owns /filter there — a collision).
+# NOT the global blacklist: phrases live in a per-chat setting, apply
+# ONLY in that group, and work with or without /protect. A hit deletes
+# the message and mutes the sender for 24 hours — never a ban. The
+# group's own admins, elevated users, and the owner are exempt
+# entirely (their messages are not even deleted), the same way the
+# protection rules treat them.
+FILTER_KEY = "mute_filter"
+FILTER_MUTE_HOURS = 24
+
+def _filter_phrases(chat_id):
+    raw = store.get_setting(chat_id, FILTER_KEY)
+    if not raw: return []
+    try: phrases = json.loads(raw)
+    except Exception: return []
+    if not isinstance(phrases, list): return []
+    return [p for p in phrases if isinstance(p, str) and p]
+
+def _filter_save(chat_id, phrases):
+    store.set_setting(chat_id, FILTER_KEY, json.dumps(phrases))
+
+def _filter_match(chat_id, text):
+    """First of THIS group's filtered phrases found in text (case-insensitive substring), else None."""
+    if not text: return None
+    phrases = _filter_phrases(chat_id)
+    if not phrases: return None
+    low = text.lower()
+    return next((p for p in phrases if p in low), None)
+
+async def _can_manage_filter(update, ctx):
+    uid = update.effective_user.id
+    if _is_owner(uid) or store.is_elevated(uid): return True
+    chat = update.effective_chat
+    if chat.type in ("group", "supergroup"):
+        return await _is_group_admin(ctx, chat.id, uid)
+    return False
+
+async def on_muteword(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if chat.type not in ("group", "supergroup"):
+        await update.effective_message.reply_text("Use /muteword in a group — the phrase filter is set per group."); return
+    if not await _can_manage_filter(update, ctx):
+        await update.effective_message.reply_text("Only this group's admins, elevated users, or the owner can manage the phrase filter."); return
+    args = ctx.args or []
+    sub = args[0].lower() if args else ""
+    if sub in ("add", "remove") and len(args) >= 2:
+        phrase = " ".join(args[1:]).lower().strip()
+        phrases = _filter_phrases(chat.id)
+        if sub == "add":
+            if len(phrase) < 3:
+                await update.effective_message.reply_text("Filter phrases need at least 3 characters."); return
+            if phrase in phrases:
+                await update.effective_message.reply_text(f"'{phrase}' is already on this group's filter."); return
+            phrases.append(phrase)
+            _filter_save(chat.id, phrases)
+            store.mod_log_add(update.effective_user.id, "filter add", None, chat.id, phrase)
+            await update.effective_message.reply_text(f"✅ '{phrase}' is on this group's filter — a message containing it is deleted and the sender muted for {FILTER_MUTE_HOURS} hours (this group only)."); return
+        if phrase in phrases:
+            phrases.remove(phrase)
+            _filter_save(chat.id, phrases)
+            store.mod_log_add(update.effective_user.id, "filter remove", None, chat.id, phrase)
+            await update.effective_message.reply_text(f"Removed '{phrase}' from this group's filter.")
+        else:
+            await update.effective_message.reply_text("That phrase isn't on this group's filter.")
+        return
+    phrases = _filter_phrases(chat.id)
+    await update.effective_message.reply_text(
+        f"🚫 Phrase filter for this group: {'ON — ' + str(len(phrases)) + ' phrase(s)' if phrases else 'OFF (no phrases set)'}\n"
+        + (("Phrases: " + ", ".join(phrases) + "\n") if phrases else "")
+        + f"A message containing a filtered phrase is deleted and the sender muted for {FILTER_MUTE_HOURS} hours. This group's admins, elevated users, and the owner are exempt.\n"
+        + "Add: /muteword add <phrase> · Remove: /muteword remove <phrase> · List: /muteword list")
+
+async def _mute_filter_check(ctx, chat, user, text, msg):
+    """Enforce this group's phrase filter on one message/caption/edit.
+    Returns True if it fired: message deleted, sender muted 24h, notice
+    posted, mod-log written. Callers run it AFTER the global blacklist
+    in protected groups, so a message hit by both gets the blacklist's
+    delete + remove only — never a double punishment."""
+    if not user or user.is_bot: return False
+    phrase = _filter_match(chat.id, text)
+    if not phrase: return False
+    if _is_owner(user.id) or store.is_elevated(user.id): return False
+    if await _is_group_admin(ctx, chat.id, user.id): return False
+    try: await msg.delete()
+    except Exception: pass
+    until = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=FILTER_MUTE_HOURS)
+    muted = True
+    try: await ctx.bot.restrict_chat_member(chat.id, user.id, permissions=NO_PERMS, until_date=until)
+    except Exception: muted = False
+    store.mod_log_add(0, "filter mute", user.id, chat.id, f"phrase '{phrase}', {FILTER_MUTE_HOURS}h")
+    name = user.full_name or str(user.id)
+    note = (f"🔇 {name} was muted for {FILTER_MUTE_HOURS} hours — a message containing a filtered phrase ('{phrase}') was removed."
+            if muted else
+            f"⚠️ A message from {name} containing a filtered phrase ('{phrase}') was removed, but the mute failed — the bot may lack admin rights here.")
+    try: await ctx.bot.send_message(chat.id, note)
+    except Exception: pass
+    return True
+
 async def on_raid(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat.type not in ("group", "supergroup"):
@@ -2195,7 +2296,10 @@ async def on_edited_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not msg or not msg.text or not msg.from_user: return
     chat, user, text = msg.chat, msg.from_user, msg.text
     if chat.type not in ("group", "supergroup") or user.is_bot: return
-    if not store.mod_is_protected(chat.id): return
+    if not store.mod_is_protected(chat.id):
+        # Unprotected group: only the per-group phrase filter applies.
+        await _mute_filter_check(ctx, chat, user, text, msg)
+        return
     if _is_owner(user.id) or store.is_elevated(user.id): return
     low = text.lower()
     bad = next((w for w in store.blacklist_all() if w in low), None)
@@ -2208,7 +2312,11 @@ async def on_edited_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             fh = store.fresh_get(chat.id, user.id)
             if fh and fh["until_ts"] > int(time.time()):
                 swap = seclogic.has_link(text)
-    if not bad and not swap: return
+    if not bad and not swap:
+        # Protected, but no blacklist/link hit — the phrase filter
+        # still applies (checked after the blacklist, so no overlap).
+        await _mute_filter_check(ctx, chat, user, text, msg)
+        return
     if await _is_group_admin(ctx, chat.id, user.id): return
     try: await msg.delete()
     except Exception: pass
@@ -2228,13 +2336,20 @@ async def on_media_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not msg or not msg.caption: return
     chat, user, text = update.effective_chat, update.effective_user, msg.caption
     if chat.type not in ("group", "supergroup") or user.is_bot: return
-    if not store.mod_is_protected(chat.id): return
+    if not store.mod_is_protected(chat.id):
+        # Unprotected group: only the per-group phrase filter applies.
+        await _mute_filter_check(ctx, chat, user, text, msg)
+        return
     first = store.first_msg_mark(chat.id, user.id)
     if _is_owner(user.id) or store.is_elevated(user.id): return
     low = text.lower()
     bad = next((w for w in store.blacklist_all() if w in low), None)
     has_link = any(e.type in ("url", "text_link") for e in (msg.caption_entities or [])) or bool(LINK_RE.search(text))
-    if not (bad or (first and has_link and not seclogic.all_links_allowlisted(text))): return
+    if not (bad or (first and has_link and not seclogic.all_links_allowlisted(text))):
+        # Protected, but no blacklist/link hit — the phrase filter
+        # still applies (checked after the blacklist, so no overlap).
+        await _mute_filter_check(ctx, chat, user, text, msg)
+        return
     if await _is_group_admin(ctx, chat.id, user.id): return
     try: await msg.delete()
     except Exception: pass
@@ -2325,6 +2440,15 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     try: await ctx.bot.send_message(chat.id, f"🚫 A member was removed: their message {why} (anti-scam protection). They may rejoin and try again.")
                     except Exception: pass
                     return
+    # Per-group phrase filter: independent of /protect — active in any
+    # group that has phrases configured. Sits after the protection
+    # block, so in a protected group the global blacklist (delete +
+    # remove) has already fired and this never double-punishes; a
+    # filter-only hit still lands here. Runs before logging, like the
+    # blacklist, so a removed message never reaches summaries.
+    if chat.type in ("group", "supergroup") and user and not user.is_bot:
+        if await _mute_filter_check(ctx, chat, user, text, update.message):
+            return
     # Log group messages for summaries
     if chat.type in ("group", "supergroup"):
         store.log_message(chat.id, user.id, name, text, update.message.message_id)
@@ -2513,6 +2637,7 @@ def main():
     app.add_handler(CommandHandler("mute", on_mute))
     app.add_handler(CommandHandler("unmute", on_unmute))
     app.add_handler(CommandHandler("blacklist", on_blacklist))
+    app.add_handler(CommandHandler("muteword", on_muteword))
     app.add_handler(CommandHandler("raid", on_raid))
     app.add_handler(CommandHandler("scamalerts", on_scamalerts))
     app.add_handler(CommandHandler("banstats", on_banstats))
