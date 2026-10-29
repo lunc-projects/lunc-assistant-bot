@@ -377,10 +377,12 @@ class FakeMessage:
 
 
 def make_update(chat_id, user_id=42, thread_id=None, chat_type="supergroup"):
+    msg = FakeMessage(thread_id)
     return types.SimpleNamespace(
         effective_chat=types.SimpleNamespace(id=chat_id, type=chat_type),
         effective_user=types.SimpleNamespace(id=user_id),
-        message=FakeMessage(thread_id))
+        message=msg,
+        effective_message=msg)
 
 
 def ctx(args, fake_bot):
