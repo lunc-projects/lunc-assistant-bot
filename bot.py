@@ -14,7 +14,7 @@ try:
     from telegram.ext import TypeHandler
 except Exception:  # test stubs / very old PTB: the usage observer just stays off
     TypeHandler = None
-import store, ai_client, burn as burn_mod, chain, lang as lang_mod, ratelimit, budget, modquiz, topics, seclogic, alerts as alerts_mod, github_pr, stats_report
+import store, ai_client, burn as burn_mod, chain, lang as lang_mod, ratelimit, budget, modquiz, topics, seclogic, alerts as alerts_mod, github_pr, stats_report, news as news_mod
 from kb import kb_as_text, find_kb_answer
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -51,6 +51,7 @@ Or just @mention me in the group, or DM me
 /proposals — all proposals currently voting
 /proposal <id> — proposal detail + live tally
 /burn — live burn tax rate + how burns work
+/news — latest crypto headlines (CoinDesk + Cointelegraph, live)
 /wallet terra1... — public wallet balance + staking
 /token terra1... — CW20 token info
 /validators — top 10 validators by voting power
@@ -572,7 +573,7 @@ async def on_ask(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     if not await ai_guard(update): return
     out = await ai_client.chat([
-        {"role":"system","content":"You are LUNC Assistant Bot, a standalone general AI assistant for Telegram groups. Answer clearly and concisely. Do not invent contract addresses or claim knowledge of any specific project. Trusted references you may cite: Finder (finder.terra.money/classic) for on-chain verification, LuncScan (luncscan.com) for explorer data and beginner staking/validator guides, LUNCDash (luncdash.com) for dashboards, and StatsBin (statsbin.com) for chain stats and upgrade countdowns. Terra Classic validators discuss governance and day-to-day operations in the Transparent Validator Chat on Telegram (t.me/transparentvalidatorchat)."},
+        {"role":"system","content":"You are LUNC Assistant Bot, a standalone general AI assistant for Telegram groups. Answer clearly and concisely. Do not invent contract addresses or claim knowledge of any specific project. Trusted references you may cite: Finder (finder.terra.money/classic) for on-chain verification, LuncScan (luncscan.com) for explorer data and beginner staking/validator guides, LUNCDash (luncdash.com) for dashboards, and StatsBin (statsbin.com) for chain stats and upgrade countdowns. Terra Classic validators discuss governance and day-to-day operations in the Transparent Validator Chat on Telegram (t.me/transparentvalidatorchat)." + "\n" + ai_client.CURRENT_EVENTS_RULE},
         {"role":"user","content": q}], lang=user_lang(update))
     if not out:
         out = ai_client.DAILY_LIMIT_NOTE if budget.exhausted() else "AI isn't configured yet (no AI_API_KEY). The owner can add the key in Railway and I'll answer fully."
@@ -650,6 +651,12 @@ async def on_price2(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def on_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try: await update.effective_message.reply_text(await chain.stats_text(), parse_mode=ParseMode.MARKDOWN)
     except Exception: await update.effective_message.reply_text("Couldn't fetch chain stats right now.")
+
+async def on_news(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    # Live RSS headlines (news.py) — a data command, no AI tokens spent.
+    # strip_mentions like the summary family: a headline must never
+    # re-tag a group member (owner decision 2026-10-28).
+    await send_long(update, ai_client.strip_mentions(await news_mod.news_text()))
 
 async def on_convert(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
@@ -2025,6 +2032,7 @@ MENU_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("🔗 Links", callback_data="menu:links"), InlineKeyboardButton("🔒 Privacy", callback_data="menu:privacy")],
     [InlineKeyboardButton("📜 Group rules", callback_data="menu:rules"), InlineKeyboardButton("❓ Group FAQ", callback_data="menu:faq")],
     [InlineKeyboardButton("🔄 DEXes", callback_data="menu:dex"), InlineKeyboardButton("🔀 GitHub PRs", callback_data="menu:pr")],
+    [InlineKeyboardButton("📰 News", callback_data="menu:news")],
 ])
 
 async def on_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -2049,6 +2057,9 @@ async def on_menu_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         text = LINKS_TEXT
     elif action == "dex":
         text = DEX_TEXT
+    elif action == "news":
+        md = False
+        text = ai_client.strip_mentions(await news_mod.news_text())
     elif action == "privacy":
         text = PRIVACY_TEXT
     elif action == "rules":
@@ -2696,7 +2707,7 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             ctx.args = q.split()
             # reuse ask logic with cleaned question: temporarily set message text path
             out = await ai_client.chat([
-                {"role":"system","content":"You are LUNC Assistant Bot, a standalone general AI assistant. Answer clearly and concisely. Trusted references you may cite: Finder (finder.terra.money/classic) for on-chain verification, LuncScan (luncscan.com) for explorer data and beginner staking/validator guides, LUNCDash (luncdash.com) for dashboards, and StatsBin (statsbin.com) for chain stats and upgrade countdowns. Terra Classic validators discuss governance and day-to-day operations in the Transparent Validator Chat on Telegram (t.me/transparentvalidatorchat)."},
+                {"role":"system","content":"You are LUNC Assistant Bot, a standalone general AI assistant. Answer clearly and concisely. Trusted references you may cite: Finder (finder.terra.money/classic) for on-chain verification, LuncScan (luncscan.com) for explorer data and beginner staking/validator guides, LUNCDash (luncdash.com) for dashboards, and StatsBin (statsbin.com) for chain stats and upgrade countdowns. Terra Classic validators discuss governance and day-to-day operations in the Transparent Validator Chat on Telegram (t.me/transparentvalidatorchat)." + "\n" + ai_client.CURRENT_EVENTS_RULE},
                 {"role":"user","content": q}], lang=user_lang(update))
             if not out:
                 out = ai_client.DAILY_LIMIT_NOTE if budget.exhausted() else "AI isn't configured yet (no AI_API_KEY)."
@@ -2774,7 +2785,7 @@ async def post_init(app: Application):
         await app.bot.set_my_short_description("Summarizes hundreds of group messages into a quick summary + AI assistant.")
         await app.bot.set_my_commands([
             ("summary","Summarize group messages"),("catchup","What you missed"),("tldr","Shrink a message (reply to it)"),
-            ("ask","Ask me anything"),("proposals","Proposals voting now"),("proposal","Proposal + tally"),("price","LUNC + USTC price"),("stats","Chain stats"),("burn","Live burn tax info"),("burnalerts","Burn notifications on/off"),("govalerts","Proposal alerts on/off"),("pr","GitHub PR info"),("pralerts","GitHub PR alerts on/off"),("prwatch","Repos watched for PR alerts"),("wallet","Public wallet lookup"),("token","CW20 token info"),("validators","Top validators"),("watchvalidator","Watch a validator"),("rank","Your rank in this chat"),("language","Choose your language"),("privacy","Privacy & security info"),("dex","DEXes on Luna Classic"),("freegames","Play Luna Classic games"),("protect","Request scam protection (group admins)"),("aiban","AI-ban a user (moderators)"),("appeal","Appeal a ban (in DM)"),("rules","This group's rules"),("menu","Buttons menu — no typing"),("panel","Admin panel (group admins)"),("help","All commands")])
+            ("ask","Ask me anything"),("proposals","Proposals voting now"),("proposal","Proposal + tally"),("price","LUNC + USTC price"),("stats","Chain stats"),("burn","Live burn tax info"),("news","Latest crypto headlines"),("burnalerts","Burn notifications on/off"),("govalerts","Proposal alerts on/off"),("pr","GitHub PR info"),("pralerts","GitHub PR alerts on/off"),("prwatch","Repos watched for PR alerts"),("wallet","Public wallet lookup"),("token","CW20 token info"),("validators","Top validators"),("watchvalidator","Watch a validator"),("rank","Your rank in this chat"),("language","Choose your language"),("privacy","Privacy & security info"),("dex","DEXes on Luna Classic"),("freegames","Play Luna Classic games"),("protect","Request scam protection (group admins)"),("aiban","AI-ban a user (moderators)"),("appeal","Appeal a ban (in DM)"),("rules","This group's rules"),("menu","Buttons menu — no typing"),("panel","Admin panel (group admins)"),("help","All commands")])
         # Profile photo (owner's logo) — re-applied on boot so redeploys never lose it
         await _apply_profile_photo()
         print("LUNC Assistant Bot: description + commands set")
@@ -2810,6 +2821,7 @@ def main():
     app.add_handler(CommandHandler("price", on_price2))
     app.add_handler(CommandHandler("burn", on_burn))
     app.add_handler(CommandHandler("stats", on_stats))
+    app.add_handler(CommandHandler("news", on_news))
     app.add_handler(CommandHandler("convert", on_convert))
     app.add_handler(CommandHandler("proposals", on_proposals))
     app.add_handler(CommandHandler("wallet", on_wallet))

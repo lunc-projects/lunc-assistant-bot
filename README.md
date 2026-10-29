@@ -44,7 +44,7 @@ bot.py (main), store.py (SQLite log), ai_client.py (AI + fallback), kb.py (verif
 - `/burn` anytime = live burn tax rate (verified live endpoint returns burn_tax_rate 0.015) + explainer.
 
 ## Full Top Pack (added 2026-10-21, owner picked "all 5" + voting/proposals + validator watch)
-- Live info: /price (LUNC+USTC, mcap, volume), /stats, /convert, /proposals, /proposal <id> (now with live tally), /burn
+- Live info: /price (LUNC+USTC, mcap, volume), /stats, /convert, /proposals, /proposal <id> (now with live tally), /burn, /news (latest crypto headlines, live RSS)
 - Lookups: /wallet terra1... (public balances + staking), /token terra1... (CW20 token_info + safety warning)
 - Validators: /validators (top 10), /validator <name|valoper>
 - Staking: /stake guide, /calc estimate (scenario table, labelled estimate — no fake APR)

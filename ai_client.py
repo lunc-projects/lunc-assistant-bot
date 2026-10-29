@@ -34,6 +34,25 @@ AI_RULES = (
     "and other defensive security education are fine."
 )
 
+# /ask current-events honesty rule (owner, 2026-10-29): the AI has NO
+# live news wire of its own — /news (RSS headlines) is the bot's only
+# current-events source. Appended to the ASK system prompts (the /ask
+# command and the @mention ask path in bot.py) — NOT to AI_RULES, so
+# summaries/tldr stay untouched. Trigger for it: the owner asked "What
+# happened to Binance? The site is offline…" and got a long generic
+# brush-off ("check their Twitter/blog/Reddit…") instead of a short,
+# honest "not my wire — headlines are on /news".
+CURRENT_EVENTS_RULE = (
+    "Current-events rule: you have NO live news wire of your own, and your "
+    "training knowledge may be out of date. If the question is about a "
+    "current event — an outage, 'what happened to X', today's news, or "
+    "anything else that needs today's facts — answer SHORT, in one or two "
+    "sentences: say you have no live news of your own, and point to /news "
+    "for the latest headlines. Do NOT pad the answer with generic advice "
+    "about checking the project's Twitter, blog, status page or Reddit, and "
+    "NEVER speculate about what is happening in an ongoing event."
+)
+
 def with_rules(messages):
     """Append AI_RULES to the system message (creating one if absent).
     Pure function — unit-testable without network, and never mutates the
