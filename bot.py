@@ -14,7 +14,7 @@ try:
     from telegram.ext import TypeHandler
 except Exception:  # test stubs / very old PTB: the usage observer just stays off
     TypeHandler = None
-import store, ai_client, burn as burn_mod, chain, lang as lang_mod, ratelimit, budget, modquiz, topics, seclogic, alerts as alerts_mod, github_pr, stats_report, news as news_mod
+import store, ai_client, burn as burn_mod, chain, lang as lang_mod, ratelimit, budget, modquiz, topics, seclogic, alerts as alerts_mod, github_pr, stats_report, news as news_mod, walletwatch
 from kb import kb_as_text, find_kb_answer
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -118,6 +118,13 @@ Type a hashtag in chat — #memo, #scammed, #ibctransfer, #safety… — and I'l
 /unwatchvalidator <terravaloper...> — stop watching
 /watchlist — validators watched in this chat
 /settings — notification menus hub
+
+*Wallet Security (DM only)*
+/security — how Wallet Security works
+/watch terra1... — watch your wallet: DM alerts on balance, staking & unbonding changes
+/watch terra1...<contract> — attach a CW20 token / NFT collection to your watches
+/watching — your watches · /unwatch terra1... — remove · /watch off — pause all
+Read-only: I never ask for a seed phrase and cannot move funds.
 In a group, only admins can change group settings. In DM, it's just for you.
 
 *Other*
@@ -151,7 +158,22 @@ USAGE_HONESTY_NOTE = ("Counts are what the bot has actually seen since usage tra
     "Telegram gives bots no list of their chats, so a group that never sends anything — and was "
     "added before tracking started — stays invisible until it stirs.")
 
-def format_usage_report(counts, legacy, pot_spent, pot_budget, heading="📊 *LUNC Assistant — daily usage*"):
+def _report_counts():
+    """registry_counts() + Wallet Security counts (counts ONLY —
+    never addresses) for the owner reports."""
+    counts = store.registry_counts()
+    try:
+        wc = store.wallet_watch_counts()
+        counts["wallet_watches"] = wc["watches"]
+        counts["wallet_watch_users"] = wc["users"]
+    except Exception:
+        counts["wallet_watches"] = 0
+        counts["wallet_watch_users"] = 0
+    counts["ww_last_success"] = int(store.get_setting(0, "ww_last_success") or 0)
+    return counts
+
+
+def format_usage_report(counts, legacy, pot_spent, pot_budget, heading="📊 LUNC Assistant — daily usage"):
     """Owner usage report — aggregate COUNTS ONLY (no group names, no
     user names, ever). `counts` is store.registry_counts(); `legacy`
     is the old log-based store.usage_counts(), kept as a clearly
@@ -178,6 +200,7 @@ def _usage_lines(counts, legacy, pot_spent, pot_budget):
         f"(commands {i['command']} · messages {i['message']} · button taps {i['button']} · other {i['other']})\n"
         f"Messages currently logged (7-day rolling): {counts['messages_logged']:,}\n"
         f"AI pot today (UTC day, estimate): {pot_spent:,} / {pot_budget:,} tokens\n"
+        f"Wallet Security: {counts.get('wallet_watches', 0)} wallet(s) watched for {counts.get('wallet_watch_users', 0)} people (counts only) · last successful sweep: {stats_report.fmt_ts_et(counts.get('ww_last_success', 0))}\n"
         f"Older log-based view (7-day message log only): {legacy['groups']} groups with logged messages"
         f" · {legacy['people_in_groups']} people in them · {legacy['dm_users']} DM users")
 
@@ -191,7 +214,7 @@ def _other_bot_section(name, title, payload, now_ts):
     -> its counts with an 'as of' time. Stale or missing -> the honest
     'no fresh report' line; numbers are NEVER invented."""
     if payload and stats_report.is_fresh(payload, now_ts):
-        head = f"*{title}* — as of {stats_report.fmt_ts_et(payload.get('ts'))}\n"
+        head = f"{title} — as of {stats_report.fmt_ts_et(payload.get('ts'))}\n"
         if name == "garuda":
             return (head
                     + f"Groups I'm in and logging: {payload.get('groups_logging', 0)} · "
@@ -210,7 +233,7 @@ def _other_bot_section(name, title, payload, now_ts):
                   f"DM users: {payload.get('dm_users', 0)}\n"
                 + f"Messages currently logged: {payload.get('messages_logged', 0):,}")
     last = stats_report.fmt_ts_et(payload.get("ts")) if payload else "never"
-    return f"*{title}*\nNo fresh report — last seen {last}"
+    return f"{title}\nNo fresh report — last seen {last}"
 
 
 def format_combined_report(counts, legacy, pot_spent, pot_budget, others, now_ts=None):
@@ -219,8 +242,8 @@ def format_combined_report(counts, legacy, pot_spent, pot_budget, others, now_ts
     sections come from their published stats_report payloads."""
     now_ts = int(now_ts if now_ts is not None else time.time())
     parts = [
-        f"📊 *Daily usage — all bots* — {counts['day']} (America/New_York)",
-        "*LUNC Assistant* (counted live here)\n"
+        f"📊 Daily usage — all bots — {counts['day']} (America/New_York)",
+        "LUNC Assistant (counted live here)\n"
         + _usage_lines(counts, legacy, pot_spent, pot_budget),
     ]
     for name, title in OTHER_BOTS:
@@ -233,10 +256,15 @@ async def on_botstats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Owner-only usage counter (not in the public command list).
     if not OWNER_ID or update.effective_user.id != OWNER_ID:
         return
-    text = format_usage_report(store.registry_counts(), store.usage_counts(),
+    text = format_usage_report(_report_counts(), store.usage_counts(),
                                budget.spent(), budget.DAILY_TOKEN_BUDGET,
-                               heading="📊 *Bot usage*")
-    await update.effective_message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+                               heading="📊 Bot usage")
+    # PLAIN TEXT on purpose (2026-10-29 fix): with parse_mode=MARKDOWN
+    # the "_" in "(America/New_York)" opened an italic entity that
+    # never closes — Telegram rejected the whole reply with
+    # "Can't parse entities ... byte offset 44" and the owner got
+    # only the error alert. Report texts are data, not markup.
+    await update.effective_message.reply_text(text)
 
 def _classify_update(update):
     """Broad interaction kind for the usage counters: command /
@@ -316,7 +344,7 @@ async def job_usage_report(ctx: ContextTypes.DEFAULT_TYPE):
             return
         if store.get_setting(0, "usage_report_day") == today:
             return
-        counts = store.registry_counts()
+        counts = _report_counts()
         legacy = store.usage_counts()
         pot_spent, pot_budget = budget.spent(), budget.DAILY_TOKEN_BUDGET
         text = None
@@ -330,7 +358,11 @@ async def job_usage_report(ctx: ContextTypes.DEFAULT_TYPE):
                 text = None  # reads failed entirely -> solo fallback below
         if text is None:
             text = format_usage_report(counts, legacy, pot_spent, pot_budget)
-        await ctx.bot.send_message(OWNER_ID, text, parse_mode=ParseMode.MARKDOWN)
+        # PLAIN TEXT — same byte-offset-44 Markdown defect as
+        # /botstats lived here: the send raised BadRequest inside
+        # this job's try/except every night and the combined report
+        # silently never reached the owner.
+        await ctx.bot.send_message(OWNER_ID, text)
         store.set_setting(0, "usage_report_day", today)
     except Exception:
         pass
@@ -2227,7 +2259,7 @@ async def on_gov_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await q.edit_message_text(gov_status_text(cid), reply_markup=gov_keyboard(cid), parse_mode=ParseMode.MARKDOWN)
 
 async def on_settings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.effective_message.reply_text("⚙️ *Settings — notifications are your choice*\n🔥 /burnalerts — burn notifications\n🗳️ /govalerts — proposal & voting notifications\n🔀 /pralerts — GitHub PR notifications (repos: /prwatch)\n🏛️ /watchlist — validators watched in this chat", parse_mode=ParseMode.MARKDOWN)
+    await update.effective_message.reply_text("⚙️ *Settings — notifications are your choice*\n🔥 /burnalerts — burn notifications\n🗳️ /govalerts — proposal & voting notifications\n🔀 /pralerts — GitHub PR notifications (repos: /prwatch)\n🏛️ /watchlist — validators watched in this chat\n🛡️ /security — Wallet Security (set up in DM)", parse_mode=ParseMode.MARKDOWN)
 
 # ================= VALIDATOR WATCH =================
 async def on_watchvalidator(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -2243,6 +2275,379 @@ async def on_unwatchvalidator(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args: await update.effective_message.reply_text("Usage: /unwatchvalidator <terravaloper...> (see /watchlist)"); return
     n = store.unwatch_validator(update.effective_chat.id, ctx.args[0])
     await update.effective_message.reply_text("Stopped watching that validator in this chat." if n else "That validator isn't on this chat's watchlist.")
+
+# ================= WALLET SECURITY (2026-10-29) =================
+# Personal wallet monitoring, DM-only. Read-only by construction:
+# this section reads public chain state and compares snapshots —
+# the bot holds no keys and can never sign or move anything.
+# A watch is keyed to the Telegram user who created it; alerts go
+# ONLY to that user's DM. Nothing is ever posted to a group.
+
+WALLET_SECURITY_INTRO = (
+    "🛡️ *Wallet Security*\n\n"
+    "Watch your own Terra Classic wallet and get a DM the moment anything changes:\n"
+    "• Bank balances (LUNC, USTC, every denom)\n"
+    "• Staking — delegations up/down, new validator, full undelegation\n"
+    "• Unbonding started or completed\n"
+    "• Any CW20 token or NFT collection you attach with /watch <contract>\n\n"
+    "Setup (in DM with me):\n"
+    "/watch terra1... — watch a wallet (up to 3)\n"
+    "/watch terra1...<contract> — attach a token/NFT contract to your watches\n"
+    "/watching — your watches · /unwatch terra1... — remove · /watch off — pause all\n\n"
+    "How it works, honestly: I read the public chain about every 15 minutes and "
+    "compare against your last snapshot — any transaction that changes your "
+    "balances, stakes or NFTs shows up as an alert in your DM, with amounts and "
+    "Finder links. A failed chain read skips that check silently rather than "
+    "guessing, so alerts are never made up.\n\n"
+    "Limits, plainly: this DETECTS and notifies — it cannot prevent or reverse "
+    "anything. Token/NFT coverage: the chain has no 'list every token in a "
+    "wallet' query, so token and NFT watching covers the contracts you attach — "
+    "bank balances and staking are covered in full automatically.\n\n"
+    "🔒 Read-only: I never ask for a seed phrase or key, and I couldn't move "
+    "funds if I wanted to — there is no key anywhere in this bot.")
+
+async def fetch_wallet_state(address, contracts):
+    """Full on-chain state for one wallet. RAISES if any section
+    fails — callers treat that as 'no data', never as a change."""
+    state = {"balances": await chain.bank_balances_all(address),
+             "delegations": await chain.delegations_map(address),
+             "unbonding": await chain.unbonding_map(address),
+             "cw20": {}, "nfts": {}}
+    for ct in contracts:
+        contract = ct["contract"]
+        if ct["kind"] == "cw20":
+            info = await chain.cw20_info(contract)
+            bal = await chain.cw20_balance(contract, address)
+            state["cw20"][contract] = {"balance": bal,
+                                       "symbol": info.get("symbol", "?"),
+                                       "decimals": int(info.get("decimals", 6))}
+        else:
+            toks = await chain.cw721_tokens(contract, address, cap=walletwatch.NFT_TOKEN_CAP)
+            state["nfts"][contract] = {"name": await chain.cw721_contract_name(contract),
+                                       "tokens": sorted(toks)}
+    return state
+
+def _watch_dm_gate(update):
+    """True if this is a private chat. In groups: point to DM and
+    return False — addresses and watch lists are never handled (or
+    echoed) in a group."""
+    return update.effective_chat.type == "private"
+
+async def on_security(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.effective_message.reply_text(WALLET_SECURITY_INTRO, parse_mode=ParseMode.MARKDOWN)
+
+async def on_watch(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    if not _watch_dm_gate(update):
+        await msg.reply_text("🛡️ Wallet Security is set up in private — DM me and send /watch there. Your watch list and alerts stay between you and me.")
+        return
+    uid = update.effective_user.id
+    if not ctx.args:
+        rows = store.wallet_watch_list(uid)
+        head = "" if not rows else f"\nYou currently watch {len(rows)} wallet(s) — /watching lists them."
+        await msg.reply_text("🛡️ *Wallet Security*\n/watch terra1... — watch a wallet (I'll take a starting snapshot now; the first check never alerts)\n/watch terra1...<contract address> — attach a CW20 token or NFT collection\n/watch off — pause all alerts · /watch on — resume\n/unwatch terra1... — remove a wallet or contract" + head, parse_mode=ParseMode.MARKDOWN)
+        return
+    a = ctx.args[0].strip()
+    if a.lower() == "off":
+        n = store.wallet_watch_set_active(uid, False)
+        await msg.reply_text(f"⏸️ Wallet Security paused for {n} wallet(s). /watch on resumes — your snapshots are kept.")
+        return
+    if a.lower() == "on":
+        n = store.wallet_watch_set_active(uid, True)
+        await msg.reply_text(f"▶️ Wallet Security resumed for {n} wallet(s).")
+        return
+    if walletwatch.validate_account_address(a):
+        contracts = store.watch_contracts_for(uid)
+        try:
+            state = await fetch_wallet_state(a, contracts)
+        except Exception:
+            await msg.reply_text("Couldn't read that wallet on-chain just now, so I haven't registered it (a watch is never started without a real starting snapshot). Try again in a moment.")
+            return
+        res = store.wallet_watch_add(uid, a, json.dumps(state))
+        if res == "user_cap":
+            await msg.reply_text(f"You already watch {walletwatch.MAX_WALLETS_PER_USER} wallets — that's the per-person limit. /unwatch one first.")
+        elif res == "global_cap":
+            await msg.reply_text("The watch list is full right now — try again later. (Nothing was registered.)")
+        elif res == "exists":
+            await msg.reply_text(f"🛡️ Already watching {a} — snapshot refreshed, alerts on.\nFull view: https://finder.terraclassic.community/mainnet/account/{a}")
+        else:
+            await msg.reply_text(f"🛡️ Watching {a}\nStarting snapshot taken — I'll DM you here whenever its balances, staking, unbonding" + (" or attached tokens/NFTs" if contracts else "") + " change (checks about every 15 minutes).\nFull view: https://finder.terraclassic.community/mainnet/account/{a}")
+        return
+    if walletwatch.validate_contract_address(a):
+        wallets = store.wallet_watch_list(uid)
+        if not wallets:
+            await msg.reply_text("Watch a wallet first (/watch terra1...), then attach token/NFT contracts to it.")
+            return
+        try:
+            kind = await chain.contract_kind(a)
+        except Exception:
+            kind = None
+        if not kind:
+            await msg.reply_text("Couldn't read that contract — check it's a CW20 token or CW721 NFT contract on Terra Classic. Nothing was attached.")
+            return
+        existing = store.watch_contracts_for(uid)
+        if any(c["contract"] == a for c in existing):
+            await msg.reply_text("That contract is already attached to your watches.")
+            return
+        if len(existing) >= walletwatch.MAX_CONTRACTS_PER_USER:
+            await msg.reply_text(f"You already have {walletwatch.MAX_CONTRACTS_PER_USER} contracts attached — that's the limit. /unwatch one first.")
+            return
+        new_contracts = existing + [{"contract": a, "kind": kind}]
+        # Baseline every wallet against the new contract set BEFORE
+        # attaching, so the attach itself never fires an alert.
+        states = {}
+        try:
+            for w in wallets:
+                states[w["address"]] = await fetch_wallet_state(w["address"], new_contracts)
+        except Exception:
+            await msg.reply_text("Couldn't read the chain just now, so the contract wasn't attached. Try again in a moment.")
+            return
+        store.watch_contract_add(uid, a, kind)
+        now = int(time.time())
+        for addr, st in states.items():
+            store.wallet_watch_update_snapshot(uid, addr, json.dumps(st), now)
+        label = "CW20 token" if kind == "cw20" else "NFT collection"
+        await msg.reply_text(f"🛡️ Attached {label} {a} to your {len(wallets)} watched wallet(s). Balance/NFT changes will be included in your alerts.\nContract: https://finder.terraclassic.community/mainnet/account/{a}")
+        return
+    await msg.reply_text("That doesn't validate as a Terra Classic address. Wallets are 44 characters starting terra1; contracts are 64. Nothing was registered — check the address and try again.")
+
+async def on_watching(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    if not _watch_dm_gate(update):
+        await msg.reply_text("🛡️ Your watch list is private — DM me and send /watching there.")
+        return
+    uid = update.effective_user.id
+    rows = store.wallet_watch_list(uid)
+    if not rows:
+        await msg.reply_text("You're not watching any wallet yet. /watch terra1... starts one.")
+        return
+    lines = ["🛡️ *Your Wallet Security watches*"]
+    for r in rows:
+        when = "not checked yet" if not r["last_checked"] else f"last checked {datetime.datetime.fromtimestamp(r['last_checked'], datetime.timezone.utc):%H:%M} UTC"
+        lines.append(f"• {r['address']}\n  {'ON' if r['active'] else 'PAUSED'} · {when}\n  https://finder.terraclassic.community/mainnet/account/{r['address']}")
+    contracts = store.watch_contracts_for(uid)
+    if contracts:
+        lines.append("\nAttached contracts (checked for every watched wallet):")
+        for c in contracts:
+            lines.append(f"• {'CW20 token' if c['kind']=='cw20' else 'NFT collection'} {c['contract']}")
+    lines.append("\nRemove: /unwatch terra1... · Pause all: /watch off")
+    await msg.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+async def on_unwatch(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    if not _watch_dm_gate(update):
+        await msg.reply_text("🛡️ Watches are managed in private — DM me and send /unwatch there.")
+        return
+    uid = update.effective_user.id
+    if not ctx.args:
+        await msg.reply_text("Usage: /unwatch terra1... (a watched wallet or an attached contract)")
+        return
+    a = ctx.args[0].strip()
+    if walletwatch.validate_account_address(a):
+        n = store.wallet_watch_remove(uid, a)
+        await msg.reply_text("Stopped watching that wallet. Its snapshot is deleted." if n else "That wallet isn't on your watch list.")
+        return
+    if walletwatch.validate_contract_address(a):
+        n = store.watch_contract_remove(uid, a)
+        await msg.reply_text("Detached that contract from your watches." if n else "That contract isn't attached to your watches.")
+        return
+    await msg.reply_text("That doesn't validate as a Terra Classic address — nothing was removed.")
+
+# --- Wallet Security sweep health (2026-10-29) ---
+# The watcher must never fail SILENTLY (owner's rule): a security
+# feature that stops alerting without anyone knowing is worse than
+# none. So sweeps keep score in settings (chat_id 0):
+#   ww_last_attempt  — a sweep ran at all (job alive)
+#   ww_last_success  — a sweep where chain reads worked
+#   ww_fail_streak   — consecutive sweeps where EVERY read failed
+# At >=3 consecutive failed sweeps the OWNER is DM'd (throttled to
+# one health alert per 6h), and a separate watchdog job DM's the
+# owner if no sweep even ATTEMPTS within 2x the interval while
+# watches exist. Users never see health noise — their alerts stay
+# strictly change-based. If the whole bot process dies, no in-bot
+# watchdog can fire; that layer is Railway's, stated honestly.
+_WW_INTERVAL = 900
+_WW_ALERT_GAP = 6 * 3600
+_WW_STARTED = int(time.time())
+
+def _ww_int_setting(key):
+    try: return int(store.get_setting(0, key) or 0)
+    except Exception: return 0
+
+async def _ww_owner_alert(ctx, text, now):
+    """Throttled owner health DM (plain text). Returns True if sent."""
+    if not OWNER_ID: return False
+    if now - _ww_int_setting("ww_health_alert_ts") < _WW_ALERT_GAP: return False
+    try:
+        await ctx.bot.send_message(OWNER_ID, text)
+        store.set_setting(0, "ww_health_alert_ts", str(now))
+        return True
+    except Exception:
+        return False
+
+async def _ww_sweep_outcome(ctx, attempted, succeeded, now):
+    store.set_setting(0, "ww_last_attempt", str(now))
+    if attempted and succeeded:
+        was_alerted = _ww_int_setting("ww_alerted") == 1
+        store.set_setting(0, "ww_last_success", str(now))
+        store.set_setting(0, "ww_fail_streak", "0")
+        if was_alerted:
+            store.set_setting(0, "ww_alerted", "0")
+            store.set_setting(0, "ww_health_alert_ts", "0")  # next outage may alert at once
+            try: await ctx.bot.send_message(OWNER_ID, "✅ Wallet Security: chain reads are working again — wallet sweeps recovered. (Owner health notice; users were never sent health noise.)")
+            except Exception: pass
+        return
+    if attempted and not succeeded:
+        streak = _ww_int_setting("ww_fail_streak") + 1
+        store.set_setting(0, "ww_fail_streak", str(streak))
+        if streak >= 3:
+            sent = await _ww_owner_alert(ctx,
+                f"⚠️ Wallet Security: {streak} consecutive wallet sweeps have failed (chain reads failing) — user change alerts may be delayed. Last successful sweep: {stats_report.fmt_ts_et(_ww_int_setting('ww_last_success'))}. The watcher keeps retrying every ~15 minutes. (Owner health notice.)", now)
+            if sent: store.set_setting(0, "ww_alerted", "1")
+
+# --- Wallet Security downtime notices (owner wording, 2026-10-29) ---
+# Users are told the truth about coverage gaps, framed as what a
+# redeploy is: a security update. Graceful shutdown -> best-effort
+# "temporarily unprotected" DM to every active watcher. Startup ->
+# after the first successful sweep, "protected again" DM (with the
+# offline window when there was a real gap), and that first sweep's
+# diff still runs against the pre-downtime baseline, its alerts
+# labeled "found on return". A hard crash sends no down-notice —
+# the startup message alone carries it. All plain-text sends.
+WW_DOWN_TEXT = "⚠️ Wallet Security: your wallet is temporarily unprotected — a security update is in progress. Protection will resume as soon as the update is done."
+WW_BACK_TEXT = "✅ Wallet Security: security update complete — your wallet is protected again."
+_WW_PREV_ATTEMPT = 0      # ww_last_attempt as seen at THIS boot (post_init)
+_WW_BACK_SENT = False     # back-notice fanout done for this boot
+
+def _ww_human_dur(sec):
+    sec = max(0, int(sec))
+    h, m = sec // 3600, (sec % 3600) // 60
+    return f"{h}h {m:02d}m" if h else f"{m}m"
+
+async def _ww_fanout(bot, text):
+    """One plain-text DM per user with an active watch. Best
+    effort: a blocked/unreachable user never stops the others."""
+    try:
+        users = store.wallet_watch_active_users()
+    except Exception:
+        return 0
+    sent = 0
+    for uid in users:
+        try:
+            await bot.send_message(uid, text)
+            sent += 1
+            await asyncio.sleep(0.05)
+        except Exception:
+            pass
+    return sent
+
+async def post_shutdown(app: Application):
+    """Best-effort downtime notice on graceful shutdown (SIGTERM /
+    redeploy): every active watcher is told their wallet is
+    temporarily unprotected while the security update lands."""
+    try:
+        store.set_setting(0, "ww_down_since", str(int(time.time())))
+        store.set_setting(0, "ww_down_announced", "1")
+        await _ww_fanout(app.bot, WW_DOWN_TEXT)
+    except Exception:
+        pass
+
+async def job_wallet_watchdog(ctx: ContextTypes.DEFAULT_TYPE):
+    """Missed-sweep watchdog: if wallets are being watched but no
+    sweep has even ATTEMPTED within 2x the interval, the job itself
+    is stuck/dead — tell the owner (throttled like other health
+    alerts). Runs on its own schedule so a wedged sweep loop can't
+    silence it."""
+    try:
+        counts = store.wallet_watch_counts()
+        if not counts["watches"]: return
+        now = int(time.time())
+        last = max(_ww_int_setting("ww_last_attempt"), _WW_STARTED)
+        if now - last > 2 * _WW_INTERVAL:
+            await _ww_owner_alert(ctx,
+                f"⚠️ Wallet Security watchdog: no wallet sweep has run for {(now - last)//60} minutes while {counts['watches']} wallet(s) are watched. Last successful sweep: {stats_report.fmt_ts_et(_ww_int_setting('ww_last_success'))}. Check the bot service. (Owner health notice.)", now)
+    except Exception:
+        pass
+
+async def job_wallet_watch(ctx: ContextTypes.DEFAULT_TYPE):
+    """Every ~15 min: diff each active watch against its snapshot
+    and DM the owner — and ONLY the owner — what changed.
+
+    No false alarms: any failed/partial chain read skips the wallet
+    for this cycle (snapshot untouched, check retried next cycle);
+    duplicate changes inside 24h are suppressed; a watch with no
+    stored snapshot baselines silently. Takes a rotating slice of
+    watches per run so the public LCD is never hammered. Sweep
+    health is scored by _ww_sweep_outcome — failures alert the
+    OWNER, never the users."""
+    global _WW_BACK_SENT
+    now0 = int(time.time())
+    try:
+        rows = store.wallet_watch_due(limit=25)
+    except Exception:
+        await _ww_sweep_outcome(ctx, 1, 0, now0)
+        return
+    attempted = succeeded = 0
+    for r in rows:
+        uid, addr = r["user_id"], r["address"]
+        now = int(time.time())
+        attempted += 1
+        try:
+            contracts = store.watch_contracts_for(uid)
+            state = await fetch_wallet_state(addr, contracts)
+            succeeded += 1
+        except Exception:
+            try: store.wallet_watch_touch(uid, addr, now)
+            except Exception: pass
+            continue
+        try:
+            old = json.loads(r["snapshot"] or "")
+        except Exception:
+            old = {}
+        if not old:
+            try: store.wallet_watch_update_snapshot(uid, addr, json.dumps(state), now)
+            except Exception: pass
+            continue
+        changes = walletwatch.diff_states(old, state)
+        fresh = [c for c in changes
+                 if not store.watch_alert_seen(uid, addr, walletwatch.change_key(c), now, walletwatch.DEDUPE_WINDOW_SECONDS)]
+        if not fresh:
+            try: store.wallet_watch_update_snapshot(uid, addr, json.dumps(state), now)
+            except Exception: pass
+            continue
+        away = bool(_WW_PREV_ATTEMPT) and not _WW_BACK_SENT
+        try:
+            await ctx.bot.send_message(uid, walletwatch.format_alert(addr, fresh, away=away))
+        except Exception:
+            # DM undeliverable right now (e.g. bot blocked): keep the
+            # snapshot so the change is retried next cycle; the
+            # dedupe log still prevents a double-send if the message
+            # actually went out before the error surfaced.
+            try: store.wallet_watch_touch(uid, addr, now)
+            except Exception: pass
+            continue
+        for c in fresh:
+            store.watch_alert_mark(uid, addr, walletwatch.change_key(c), now)
+        try: store.wallet_watch_update_snapshot(uid, addr, json.dumps(state), now)
+        except Exception: pass
+    await _ww_sweep_outcome(ctx, attempted, succeeded, int(time.time()))
+    # Startup resume notice: after THIS boot's first successful
+    # sweep, tell every watcher protection is back. The sweep above
+    # already diffed against the pre-downtime baselines, so changes
+    # from the offline window are alerted (labeled "found on
+    # return") in the same pass.
+    if attempted and succeeded and _WW_PREV_ATTEMPT and not _WW_BACK_SENT:
+        _WW_BACK_SENT = True
+        gap = int(time.time()) - _WW_PREV_ATTEMPT
+        text = WW_BACK_TEXT
+        if gap > _WW_INTERVAL:
+            text += (f"\nI was offline for about {_ww_human_dur(gap)} — anything that "
+                     "changed in that time is being checked against your last snapshot now.")
+        try:
+            await _ww_fanout(ctx.bot, text)
+            store.set_setting(0, "ww_down_announced", "0")
+        except Exception:
+            pass
 
 async def on_watchlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     rows = store.list_watched(update.effective_chat.id)
@@ -2780,12 +3185,14 @@ async def _apply_profile_photo():
         print(f"profile photo: {e}")
 
 async def post_init(app: Application):
+    global _WW_PREV_ATTEMPT
+    _WW_PREV_ATTEMPT = _ww_int_setting("ww_last_attempt")
     try:
         await app.bot.set_my_description("LUNC Assistant Bot — I summarize busy group chats into a quick TL;DR and answer questions. Use /summary, /catchup, /ask in a group, or DM me a long text to summarize.")
         await app.bot.set_my_short_description("Summarizes hundreds of group messages into a quick summary + AI assistant.")
         await app.bot.set_my_commands([
             ("summary","Summarize group messages"),("catchup","What you missed"),("tldr","Shrink a message (reply to it)"),
-            ("ask","Ask me anything"),("proposals","Proposals voting now"),("proposal","Proposal + tally"),("price","LUNC + USTC price"),("stats","Chain stats"),("burn","Live burn tax info"),("news","Latest crypto headlines"),("burnalerts","Burn notifications on/off"),("govalerts","Proposal alerts on/off"),("pr","GitHub PR info"),("pralerts","GitHub PR alerts on/off"),("prwatch","Repos watched for PR alerts"),("wallet","Public wallet lookup"),("token","CW20 token info"),("validators","Top validators"),("watchvalidator","Watch a validator"),("rank","Your rank in this chat"),("language","Choose your language"),("privacy","Privacy & security info"),("dex","DEXes on Luna Classic"),("freegames","Play Luna Classic games"),("protect","Request scam protection (group admins)"),("aiban","AI-ban a user (moderators)"),("appeal","Appeal a ban (in DM)"),("rules","This group's rules"),("menu","Buttons menu — no typing"),("panel","Admin panel (group admins)"),("help","All commands")])
+            ("ask","Ask me anything"),("proposals","Proposals voting now"),("proposal","Proposal + tally"),("price","LUNC + USTC price"),("stats","Chain stats"),("burn","Live burn tax info"),("news","Latest crypto headlines"),("burnalerts","Burn notifications on/off"),("govalerts","Proposal alerts on/off"),("pr","GitHub PR info"),("pralerts","GitHub PR alerts on/off"),("prwatch","Repos watched for PR alerts"),("wallet","Public wallet lookup"),("token","CW20 token info"),("validators","Top validators"),("watchvalidator","Watch a validator"),("security","Wallet Security — watch your wallet"),("watch","Wallet Security — watch a wallet (DM)"),("watching","Wallet Security — your watches"),("unwatch","Wallet Security — remove a watch"),("rank","Your rank in this chat"),("language","Choose your language"),("privacy","Privacy & security info"),("dex","DEXes on Luna Classic"),("freegames","Play Luna Classic games"),("protect","Request scam protection (group admins)"),("aiban","AI-ban a user (moderators)"),("appeal","Appeal a ban (in DM)"),("rules","This group's rules"),("menu","Buttons menu — no typing"),("panel","Admin panel (group admins)"),("help","All commands")])
         # Profile photo (owner's logo) — re-applied on boot so redeploys never lose it
         await _apply_profile_photo()
         print("LUNC Assistant Bot: description + commands set")
@@ -2797,7 +3204,7 @@ async def post_init(app: Application):
 def main():
     if not TOKEN:
         raise SystemExit("TELEGRAM_BOT_TOKEN is missing — paste it in Railway env vars (never in chat/repo).")
-    _builder = Application.builder().token(TOKEN).post_init(post_init)
+    _builder = Application.builder().token(TOKEN).post_init(post_init).post_shutdown(post_shutdown)
     _proxy = os.getenv("OUTBOUND_PROXY")
     if _proxy: _builder = _builder.proxy(_proxy).get_updates_proxy(_proxy)
     app = _builder.build()
@@ -2843,6 +3250,10 @@ def main():
     app.add_handler(CommandHandler("watchvalidator", on_watchvalidator))
     app.add_handler(CommandHandler("unwatchvalidator", on_unwatchvalidator))
     app.add_handler(CommandHandler("watchlist", on_watchlist))
+    app.add_handler(CommandHandler("security", on_security))
+    app.add_handler(CommandHandler("watch", on_watch))
+    app.add_handler(CommandHandler("watching", on_watching))
+    app.add_handler(CommandHandler("unwatch", on_unwatch))
     app.add_handler(CommandHandler("burnalerts", on_burnalerts))
     app.add_handler(CommandHandler("settings", on_settings))
     app.add_handler(CommandHandler("privacy", on_privacy))
@@ -2909,6 +3320,8 @@ def main():
         app.job_queue.run_repeating(job_scam_alerts, interval=1800, first=300)
         app.job_queue.run_repeating(job_usage_report, interval=900, first=420)  # owner daily usage DM, 7 PM ET (self-healing check inside)
         app.job_queue.run_repeating(job_stats_publish, interval=1800, first=300)  # publish own counts for the combined report
+        app.job_queue.run_repeating(job_wallet_watch, interval=900, first=480)  # Wallet Security: ~15-min wallet diffs, DM alerts
+        app.job_queue.run_repeating(job_wallet_watchdog, interval=900, first=600)  # Wallet Security watchdog: missed-sweep owner alert
         import datetime as _dt
         app.job_queue.run_daily(job_burn_daily, time=_dt.time(hour=1, minute=0))  # ~9pm ET (UTC-4), shifts 1h in winter
     print("LUNC Assistant Bot polling…")

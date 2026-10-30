@@ -965,3 +965,126 @@ def registry_counts(day=None):
     }
     c.close()
     return out
+
+# --- Wallet Security (2026-10-29): per-user personal wallet watches ---
+# Rows are keyed by user_id: a watch is visible ONLY to its owner.
+# Alerts are DM'd to that user_id and nowhere else. All queries are
+# parameterized; addresses reach this layer only after strict bech32
+# validation in walletwatch.py. Snapshots are the bot's own JSON of
+# public on-chain state (balances/stakes/NFT ids) — no secrets, no
+# keys, nothing a block explorer doesn't already show.
+WALLET_WATCH_GLOBAL_CAP = int(os.getenv("WALLET_WATCH_GLOBAL_CAP", "500"))
+
+def _ensure_wallet_watch(c):
+    c.execute("""CREATE TABLE IF NOT EXISTS wallet_watches(
+        user_id INTEGER, address TEXT, active INTEGER DEFAULT 1,
+        snapshot TEXT DEFAULT '', last_checked INTEGER DEFAULT 0,
+        PRIMARY KEY(user_id, address))""")
+    c.execute("""CREATE TABLE IF NOT EXISTS watch_contracts(
+        user_id INTEGER, contract TEXT, kind TEXT,
+        PRIMARY KEY(user_id, contract))""")
+    c.execute("""CREATE TABLE IF NOT EXISTS watch_alert_log(
+        user_id INTEGER, address TEXT, alert_hash TEXT, ts INTEGER,
+        PRIMARY KEY(user_id, address, alert_hash))""")
+
+def wallet_watch_add(user_id, address, snapshot_json):
+    """Returns 'added' | 'exists' | 'user_cap' | 'global_cap'."""
+    import walletwatch
+    c = _conn(); _ensure_wallet_watch(c)
+    row = c.execute("SELECT address FROM wallet_watches WHERE user_id=? AND address=?", (user_id, address)).fetchone()
+    if row:
+        c.execute("UPDATE wallet_watches SET active=1, snapshot=? WHERE user_id=? AND address=?", (snapshot_json, user_id, address))
+        c.commit(); c.close(); return "exists"
+    n_user = c.execute("SELECT COUNT(*) AS n FROM wallet_watches WHERE user_id=?", (user_id,)).fetchone()["n"]
+    if n_user >= walletwatch.MAX_WALLETS_PER_USER:
+        c.close(); return "user_cap"
+    n_all = c.execute("SELECT COUNT(*) AS n FROM wallet_watches").fetchone()["n"]
+    if n_all >= WALLET_WATCH_GLOBAL_CAP:
+        c.close(); return "global_cap"
+    c.execute("INSERT INTO wallet_watches(user_id,address,active,snapshot,last_checked) VALUES(?,?,1,?,0)", (user_id, address, snapshot_json))
+    c.commit(); c.close(); return "added"
+
+def wallet_watch_list(user_id):
+    c = _conn(); _ensure_wallet_watch(c)
+    rows = c.execute("SELECT * FROM wallet_watches WHERE user_id=? ORDER BY address", (user_id,)).fetchall()
+    c.close(); return [dict(r) for r in rows]
+
+def wallet_watch_remove(user_id, address):
+    c = _conn(); _ensure_wallet_watch(c)
+    cur = c.execute("DELETE FROM wallet_watches WHERE user_id=? AND address=?", (user_id, address))
+    c.commit(); n = cur.rowcount; c.close(); return n
+
+def wallet_watch_set_active(user_id, active, address=None):
+    c = _conn(); _ensure_wallet_watch(c)
+    if address:
+        cur = c.execute("UPDATE wallet_watches SET active=? WHERE user_id=? AND address=?", (1 if active else 0, user_id, address))
+    else:
+        cur = c.execute("UPDATE wallet_watches SET active=? WHERE user_id=?", (1 if active else 0, user_id))
+    c.commit(); n = cur.rowcount; c.close(); return n
+
+def wallet_watch_due(limit=25):
+    """Active watches, least-recently-checked first — the job takes
+    a slice each cycle so checks stagger instead of hammering the
+    public LCD all at once."""
+    c = _conn(); _ensure_wallet_watch(c)
+    rows = c.execute("SELECT * FROM wallet_watches WHERE active=1 ORDER BY last_checked ASC LIMIT ?", (limit,)).fetchall()
+    c.close(); return [dict(r) for r in rows]
+
+def wallet_watch_touch(user_id, address, ts):
+    c = _conn(); _ensure_wallet_watch(c)
+    c.execute("UPDATE wallet_watches SET last_checked=? WHERE user_id=? AND address=?", (ts, user_id, address))
+    c.commit(); c.close()
+
+def wallet_watch_update_snapshot(user_id, address, snapshot_json, ts):
+    c = _conn(); _ensure_wallet_watch(c)
+    c.execute("UPDATE wallet_watches SET snapshot=?, last_checked=? WHERE user_id=? AND address=?", (snapshot_json, ts, user_id, address))
+    c.commit(); c.close()
+
+def watch_contract_add(user_id, contract, kind):
+    """Returns 'added' | 'exists' | 'cap'."""
+    import walletwatch
+    c = _conn(); _ensure_wallet_watch(c)
+    row = c.execute("SELECT contract FROM watch_contracts WHERE user_id=? AND contract=?", (user_id, contract)).fetchone()
+    if row: c.close(); return "exists"
+    n = c.execute("SELECT COUNT(*) AS n FROM watch_contracts WHERE user_id=?", (user_id,)).fetchone()["n"]
+    if n >= walletwatch.MAX_CONTRACTS_PER_USER:
+        c.close(); return "cap"
+    c.execute("INSERT INTO watch_contracts(user_id,contract,kind) VALUES(?,?,?)", (user_id, contract, kind))
+    c.commit(); c.close(); return "added"
+
+def watch_contracts_for(user_id):
+    c = _conn(); _ensure_wallet_watch(c)
+    rows = c.execute("SELECT * FROM watch_contracts WHERE user_id=? ORDER BY contract", (user_id,)).fetchall()
+    c.close(); return [dict(r) for r in rows]
+
+def watch_contract_remove(user_id, contract):
+    c = _conn(); _ensure_wallet_watch(c)
+    cur = c.execute("DELETE FROM watch_contracts WHERE user_id=? AND contract=?", (user_id, contract))
+    c.commit(); n = cur.rowcount; c.close(); return n
+
+def watch_alert_seen(user_id, address, alert_hash, now, window):
+    c = _conn(); _ensure_wallet_watch(c)
+    r = c.execute("SELECT ts FROM watch_alert_log WHERE user_id=? AND address=? AND alert_hash=?", (user_id, address, alert_hash)).fetchone()
+    c.close()
+    return bool(r) and (now - r["ts"] < window)
+
+def watch_alert_mark(user_id, address, alert_hash, ts):
+    c = _conn(); _ensure_wallet_watch(c)
+    c.execute("INSERT INTO watch_alert_log(user_id,address,alert_hash,ts) VALUES(?,?,?,?) ON CONFLICT(user_id,address,alert_hash) DO UPDATE SET ts=excluded.ts", (user_id, address, alert_hash, ts))
+    c.execute("DELETE FROM watch_alert_log WHERE ts < ?", (ts - 7 * 86400,))
+    c.commit(); c.close()
+
+def wallet_watch_counts():
+    """Counts ONLY (owner reporting) — never addresses or user ids."""
+    c = _conn(); _ensure_wallet_watch(c)
+    w = c.execute("SELECT COUNT(*) AS n FROM wallet_watches").fetchone()["n"]
+    u = c.execute("SELECT COUNT(DISTINCT user_id) AS n FROM wallet_watches").fetchone()["n"]
+    c.close(); return {"watches": w, "users": u}
+
+def wallet_watch_active_users():
+    """Distinct user ids with at least one ACTIVE watch — the
+    downtime-notice fanout list. Ids only; no addresses leave the
+    store in bulk."""
+    c = _conn(); _ensure_wallet_watch(c)
+    rows = c.execute("SELECT DISTINCT user_id FROM wallet_watches WHERE active=1").fetchall()
+    c.close(); return [r["user_id"] for r in rows]

@@ -117,3 +117,83 @@ async def find_validator(query):
 def snapshot(v):
     return {"status": v["status"], "jailed": v["jailed"],
             "commission": v["commission"]["commission_rates"]["rate"], "tokens": int(v["tokens"])}
+
+# --- Wallet Security reads (2026-10-29): full state of one wallet ---
+# Every helper RAISES on failure — the wallet-watch job treats any
+# failed section as "skip this wallet this cycle", never as a change.
+
+async def _get_paged(path, list_key, limit=200, max_pages=10):
+    """Follow Cosmos pagination.key until the list is complete."""
+    out, key = [], None
+    for _ in range(max_pages):
+        sep = "&" if "?" in path else "?"
+        p = f"{path}{sep}pagination.limit={limit}"
+        if key: p += f"&pagination.key={key}"
+        d = await _get(p)
+        out += d.get(list_key, [])
+        key = (d.get("pagination") or {}).get("next_key")
+        if not key: break
+    return out
+
+async def bank_balances_all(addr):
+    rows = await _get_paged(f"/cosmos/bank/v1beta1/balances/{addr}", "balances")
+    return {r["denom"]: r["amount"] for r in rows}
+
+async def delegations_map(addr):
+    rows = await _get_paged(f"/cosmos/staking/v1beta1/delegations/{addr}", "delegation_responses")
+    return {r["delegation"]["validator_address"]: r["balance"]["amount"] for r in rows}
+
+async def unbonding_map(addr):
+    rows = await _get_paged(f"/cosmos/staking/v1beta1/delegators/{addr}/unbonding_delegations", "unbonding_delegation_responses")
+    out = {}
+    for r in rows:
+        entries = r.get("entries", [])
+        total = sum(int(e["balance"]) for e in entries)
+        out[r["validator_address"]] = {"total": str(total), "entries": len(entries)}
+    return out
+
+def _smart(addr, msg):
+    return base64.b64encode(json.dumps(msg).encode()).decode()
+
+async def cw20_info(contract):
+    d = await _get(f"/cosmwasm/wasm/v1/contract/{contract}/smart/{_smart(contract, {'token_info': {}})}")
+    return d["data"]
+
+async def cw20_balance(contract, addr):
+    d = await _get(f"/cosmwasm/wasm/v1/contract/{contract}/smart/{_smart(contract, {'balance': {'address': addr}})}")
+    return d["data"]["balance"]
+
+async def cw721_num_tokens(contract):
+    d = await _get(f"/cosmwasm/wasm/v1/contract/{contract}/smart/{_smart(contract, {'num_tokens': {}})}")
+    return int(d["data"]["count"])
+
+async def cw721_contract_name(contract):
+    try:
+        d = await _get(f"/cosmwasm/wasm/v1/contract/{contract}/smart/{_smart(contract, {'contract_info': {}})}")
+        return d["data"].get("name") or "NFT collection"
+    except Exception:
+        return "NFT collection"
+
+async def cw721_tokens(contract, addr, cap=1000):
+    """All token ids of `addr` in one CW721 collection (paged)."""
+    out, start = [], None
+    while len(out) < cap:
+        q = {"tokens": {"owner": addr, "limit": 100}}
+        if start: q["tokens"]["start_after"] = start
+        d = await _get(f"/cosmwasm/wasm/v1/contract/{contract}/smart/{_smart(contract, q)}")
+        ids = d["data"].get("tokens", [])
+        if not ids: break
+        out += ids; start = ids[-1]
+        if len(ids) < 100: break
+    return out[:cap]
+
+async def contract_kind(contract):
+    """'cw20', 'cw721' or None — decided by the contract's own
+    answers, never by guessing from the address."""
+    try:
+        info = await cw20_info(contract)
+        if "symbol" in info and "decimals" in info: return "cw20"
+    except Exception: pass
+    try:
+        await cw721_num_tokens(contract); return "cw721"
+    except Exception: return None

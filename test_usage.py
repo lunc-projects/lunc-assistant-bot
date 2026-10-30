@@ -309,10 +309,10 @@ combined = bot.format_combined_report(fixed, legacy, 12340, 200000,
                                       {"garuda": _garuda_fresh, "professor": _prof_fresh,
                                        "do": _do_fresh}, now_ts=_now)
 check("combined: header covers all bots", "Daily usage — all bots" in combined)
-check("combined: LUNC section counted live", "*LUNC Assistant*" in combined and "Groups I'm in: 12 confirmed" in combined)
-check("combined: garuda counts + as-of", "*Garuda Assistant* — as of" in combined and "People seen talking in those groups: 40" in combined)
+check("combined: LUNC section counted live", "LUNC Assistant (counted live here)" in combined and "Groups I'm in: 12 confirmed" in combined)
+check("combined: garuda counts + as-of", "Garuda Assistant — as of" in combined and "People seen talking in those groups: 40" in combined)
 check("combined: professor counts", "Groups I'm serving: 4" in combined and "DM today (UTC, since its last restart): 2" in combined)
-check("combined: do counts", "*DO Chain Assistant* — as of" in combined and "Messages currently logged: 700" in combined)
+check("combined: do counts", "DO Chain Assistant — as of" in combined and "Messages currently logged: 700" in combined)
 check("combined: no stale lines when all fresh", "No fresh report" not in combined)
 check("combined: contains NO names/usernames", "@" not in combined)
 
