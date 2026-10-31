@@ -2294,7 +2294,7 @@ WALLET_SECURITY_INTRO = (
     "/watch terra1... — watch a wallet (up to 3)\n"
     "/watch terra1...<contract> — attach a token/NFT contract to your watches\n"
     "/watching — your watches · /unwatch terra1... — remove · /watch off — pause all\n\n"
-    "How it works, honestly: I read the public chain about every 15 minutes and "
+    "How it works, honestly: I read the public chain about every minute and "
     "compare against your last snapshot — any transaction that changes your "
     "balances, stakes or NFTs shows up as an alert in your DM, with amounts and "
     "Finder links. A failed chain read skips that check silently rather than "
@@ -2306,25 +2306,34 @@ WALLET_SECURITY_INTRO = (
     "🔒 Read-only: I never ask for a seed phrase or key, and I couldn't move "
     "funds if I wanted to — there is no key anywhere in this bot.")
 
-async def fetch_wallet_state(address, contracts):
+async def fetch_wallet_state(address, contracts, include_contracts=True):
     """Full on-chain state for one wallet. RAISES if any section
-    fails — callers treat that as 'no data', never as a change."""
+    fails — callers treat that as 'no data', never as a change.
+    include_contracts=False is the sweep's fast lane (bank +
+    staking only): the caller carries the stored CW20/NFT
+    sections over, so those still diff on the full-lane cadence.
+    The snapshot also records the chain height it was read at
+    ("_height", a best-effort extra — 0 if that one read failed):
+    consecutive heights bound the per-transaction walk."""
     state = {"balances": await chain.bank_balances_all(address),
              "delegations": await chain.delegations_map(address),
              "unbonding": await chain.unbonding_map(address),
              "cw20": {}, "nfts": {}}
-    for ct in contracts:
-        contract = ct["contract"]
-        if ct["kind"] == "cw20":
-            info = await chain.cw20_info(contract)
-            bal = await chain.cw20_balance(contract, address)
-            state["cw20"][contract] = {"balance": bal,
-                                       "symbol": info.get("symbol", "?"),
-                                       "decimals": int(info.get("decimals", 6))}
-        else:
-            toks = await chain.cw721_tokens(contract, address, cap=walletwatch.NFT_TOKEN_CAP)
-            state["nfts"][contract] = {"name": await chain.cw721_contract_name(contract),
-                                       "tokens": sorted(toks)}
+    if include_contracts:
+        for ct in contracts:
+            contract = ct["contract"]
+            if ct["kind"] == "cw20":
+                info = await chain.cw20_info(contract)
+                bal = await chain.cw20_balance(contract, address)
+                state["cw20"][contract] = {"balance": bal,
+                                           "symbol": info.get("symbol", "?"),
+                                           "decimals": int(info.get("decimals", 6))}
+            else:
+                toks = await chain.cw721_tokens(contract, address, cap=walletwatch.NFT_TOKEN_CAP)
+                state["nfts"][contract] = {"name": await chain.cw721_contract_name(contract),
+                                           "tokens": sorted(toks)}
+    try: state["_height"] = await chain.latest_height()
+    except Exception: state["_height"] = 0
     return state
 
 def _watch_dm_gate(update):
@@ -2371,7 +2380,7 @@ async def on_watch(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         elif res == "exists":
             await msg.reply_text(f"🛡️ Already watching {a} — snapshot refreshed, alerts on.\nFull view: https://finder.terraclassic.community/mainnet/account/{a}")
         else:
-            await msg.reply_text(f"🛡️ Watching {a}\nStarting snapshot taken — I'll DM you here whenever its balances, staking, unbonding" + (" or attached tokens/NFTs" if contracts else "") + f" change (checks about every 15 minutes).\nFull view: https://finder.terraclassic.community/mainnet/account/{a}")
+            await msg.reply_text(f"🛡️ Watching {a}\nStarting snapshot taken — I'll DM you here whenever its balances, staking, unbonding" + (" or attached tokens/NFTs" if contracts else "") + f" change (checks about every minute).\nFull view: https://finder.terraclassic.community/mainnet/account/{a}")
         return
     if walletwatch.validate_contract_address(a):
         wallets = store.wallet_watch_list(uid)
@@ -2466,7 +2475,9 @@ async def on_unwatch(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # watches exist. Users never see health noise — their alerts stay
 # strictly change-based. If the whole bot process dies, no in-bot
 # watchdog can fire; that layer is Railway's, stated honestly.
-_WW_INTERVAL = 900
+_WW_INTERVAL = 60
+_WW_FULL_EVERY = 15      # sweeps between full (CW20/NFT) refreshes
+_WW_CYCLE = _WW_FULL_EVERY - 1  # first sweep after boot is a full one
 _WW_ALERT_GAP = 6 * 3600
 _WW_STARTED = int(time.time())
 
@@ -2502,7 +2513,7 @@ async def _ww_sweep_outcome(ctx, attempted, succeeded, now):
         store.set_setting(0, "ww_fail_streak", str(streak))
         if streak >= 3:
             sent = await _ww_owner_alert(ctx,
-                f"⚠️ Wallet Security: {streak} consecutive wallet sweeps have failed (chain reads failing) — user change alerts may be delayed. Last successful sweep: {stats_report.fmt_ts_et(_ww_int_setting('ww_last_success'))}. The watcher keeps retrying every ~15 minutes. (Owner health notice.)", now)
+                f"⚠️ Wallet Security: {streak} consecutive wallet sweeps have failed (chain reads failing) — user change alerts may be delayed. Last successful sweep: {stats_report.fmt_ts_et(_ww_int_setting('ww_last_success'))}. The watcher keeps retrying about every minute. (Owner health notice.)", now)
             if sent: store.set_setting(0, "ww_alerted", "1")
 
 # --- Wallet Security downtime notices (owner wording, 2026-10-29) ---
@@ -2570,7 +2581,7 @@ async def job_wallet_watchdog(ctx: ContextTypes.DEFAULT_TYPE):
         pass
 
 async def job_wallet_watch(ctx: ContextTypes.DEFAULT_TYPE):
-    """Every ~15 min: diff each active watch against its snapshot
+    """Every ~1 min: diff each active watch against its snapshot
     and DM the owner — and ONLY the owner — what changed.
 
     No false alarms: any failed/partial chain read skips the wallet
@@ -2579,8 +2590,19 @@ async def job_wallet_watch(ctx: ContextTypes.DEFAULT_TYPE):
     stored snapshot baselines silently. Takes a rotating slice of
     watches per run so the public LCD is never hammered. Sweep
     health is scored by _ww_sweep_outcome — failures alert the
-    OWNER, never the users."""
-    global _WW_BACK_SENT
+    OWNER, never the users.
+
+    Two lanes keep the 1-minute cadence polite: bank + staking
+    state (the money movement) is read every sweep, while the
+    expensive CW20/NFT enumeration refreshes every _WW_FULL_EVERY
+    sweeps (the old ~15-min cadence) and is carried over in
+    between. When both snapshots carry height watermarks, the
+    balance section is rebuilt per transaction from the window's
+    actual txs (walletwatch.merge_tx_changes) so an in and an out
+    inside one window alert as two lines, never one net figure."""
+    global _WW_BACK_SENT, _WW_CYCLE
+    _WW_CYCLE += 1
+    full_lane = (_WW_CYCLE % _WW_FULL_EVERY == 0)
     now0 = int(time.time())
     try:
         rows = store.wallet_watch_due(limit=25)
@@ -2593,22 +2615,33 @@ async def job_wallet_watch(ctx: ContextTypes.DEFAULT_TYPE):
         now = int(time.time())
         attempted += 1
         try:
+            old = json.loads(r["snapshot"] or "")
+        except Exception:
+            old = {}
+        try:
             contracts = store.watch_contracts_for(uid)
-            state = await fetch_wallet_state(addr, contracts)
+            state = await fetch_wallet_state(addr, contracts,
+                                             include_contracts=full_lane or not old)
+            if old and not full_lane:
+                state["cw20"] = old.get("cw20", {})
+                state["nfts"] = old.get("nfts", {})
             succeeded += 1
         except Exception:
             try: store.wallet_watch_touch(uid, addr, now)
             except Exception: pass
             continue
-        try:
-            old = json.loads(r["snapshot"] or "")
-        except Exception:
-            old = {}
         if not old:
             try: store.wallet_watch_update_snapshot(uid, addr, json.dumps(state), now)
             except Exception: pass
             continue
         changes = walletwatch.diff_states(old, state)
+        _oh, _nh = int(old.get("_height") or 0), int(state.get("_height") or 0)
+        if 0 < _oh <= _nh:
+            try:
+                _txs = await chain.recent_wallet_txs(addr, _oh, _nh)
+            except Exception:
+                _txs = None
+            changes = walletwatch.merge_tx_changes(changes, old, state, _txs)
         fresh = [c for c in changes
                  if not store.watch_alert_seen(uid, addr, walletwatch.change_key(c), now, walletwatch.DEDUPE_WINDOW_SECONDS)]
         if not fresh:
@@ -3320,7 +3353,7 @@ def main():
         app.job_queue.run_repeating(job_scam_alerts, interval=1800, first=300)
         app.job_queue.run_repeating(job_usage_report, interval=900, first=420)  # owner daily usage DM, 7 PM ET (self-healing check inside)
         app.job_queue.run_repeating(job_stats_publish, interval=1800, first=300)  # publish own counts for the combined report
-        app.job_queue.run_repeating(job_wallet_watch, interval=900, first=480)  # Wallet Security: ~15-min wallet diffs, DM alerts
+        app.job_queue.run_repeating(job_wallet_watch, interval=_WW_INTERVAL, first=30)  # Wallet Security: ~1-min wallet checks, DM alerts
         app.job_queue.run_repeating(job_wallet_watchdog, interval=900, first=600)  # Wallet Security watchdog: missed-sweep owner alert
         import datetime as _dt
         app.job_queue.run_daily(job_burn_daily, time=_dt.time(hour=1, minute=0))  # ~9pm ET (UTC-4), shifts 1h in winter

@@ -2,7 +2,7 @@
 
 Personal wallet monitoring for the LUNC Assistant Bot: a user
 registers their own Terra Classic address in DM and the bot diffs
-the wallet's on-chain state every ~15 minutes, DMing an alert when
+the wallet's on-chain state about every minute, DMing an alert when
 anything changes (balances, staking, unbonding, attached CW20/NFT
 contracts).
 
@@ -198,6 +198,61 @@ def diff_states(old, new):
     return changes
 
 
+# --- Per-transaction balance changes (2026-10-31) ---
+# A snapshot diff nets everything inside one sweep window into a
+# single per-denom line — an in and an out in the same window used
+# to surface as one unexplained net figure (+98,500 in and
+# -10,015.257545 out read as a single +88,484.74 line). When the
+# sweep walks the window's actual txs (chain.recent_wallet_txs),
+# balance changes are rebuilt per transaction instead: one line
+# per tx, running old->new totals, each line carrying its tx hash
+# (Finder link in the alert, per-tx dedupe via change_key). The
+# rebuild is accepted per denom ONLY when the tx lines land
+# exactly on the new snapshot — a partial walk (a tx the LCD
+# didn't return, a read race) falls back to the plain netted line
+# for that denom, so an alert's totals always reconcile with the
+# snapshot it was diffed from.
+
+def tx_balance_changes(old_balances, new_balances, txs):
+    """'balance' change dicts built from the window's txs.
+    txs: [{hash, height, deltas:{denom: signed int}}], oldest
+    first. A denom the txs touch alerts even when its net over
+    the window is zero — an in and an out of the same size are
+    two changes, not none."""
+    denoms = set(old_balances) | set(new_balances)
+    for tx in txs:
+        denoms |= {d for d, v in (tx.get("deltas") or {}).items() if v}
+    out = []
+    for denom in sorted(denoms):
+        o = int(old_balances.get(denom) or 0)
+        n = int(new_balances.get(denom) or 0)
+        running, lines = o, []
+        for tx in txs:
+            dv = int((tx.get("deltas") or {}).get(denom) or 0)
+            if not dv: continue
+            lines.append(_chg("balance", denom, old=str(running),
+                              new=str(running + dv), tx=tx["hash"],
+                              height=tx["height"]))
+            running += dv
+        if lines and running == n:
+            out += lines
+        elif o != n:
+            out.append(_chg("balance", denom, old=str(o), new=str(n)))
+    return out
+
+
+def merge_tx_changes(changes, old, new, txs):
+    """Swap a diff_states result's balance section for the
+    per-transaction rebuild, keeping every other section as
+    diffed. txs=None (the walk failed, or the stored snapshot
+    predates height watermarks) returns the diff untouched."""
+    if txs is None:
+        return changes
+    rest = [c for c in changes if c["kind"] != "balance"]
+    return tx_balance_changes(old.get("balances", {}),
+                              new.get("balances", {}), txs) + rest
+
+
 def change_key(change):
     """Stable hash for duplicate suppression: same change to the
     same wallet section never alerts twice inside the window."""
@@ -231,6 +286,8 @@ def format_alert(address, changes, away=False):
             sym, dec = _bal_label(c["key"])
             lines.append(f"• {sym} balance: {fmt_amount(c['old'], dec)} → "
                          f"{fmt_amount(c['new'], dec)} ({fmt_delta(c['old'], c['new'], dec)} {sym})")
+            if c.get("tx"):
+                lines.append(f"  Tx: {FINDER}/tx/{c['tx']}")
         elif k == "delegation":
             lines.append(f"• Staked with {c['key']}: {fmt_amount(c['old'], 6)} → "
                          f"{fmt_amount(c['new'], 6)} LUNC ({fmt_delta(c['old'], c['new'], 6)})")

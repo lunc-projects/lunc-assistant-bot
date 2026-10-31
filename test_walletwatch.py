@@ -316,7 +316,7 @@ STATE_B = {"balances": {"uluna": "2000000"}, "delegations": {}, "unbonding": {},
 _script = {"state": STATE_A, "fail": False}
 
 
-async def _fake_fetch(address, contracts):
+async def _fake_fetch(address, contracts, include_contracts=True):
     # Only 777's wallet (ADDR2) follows the script; every other
     # watch in the shared test DB gets a state identical to its
     # stored snapshot, so it can never produce a change.
@@ -622,6 +622,97 @@ check("link pin: alert DM has no unexpanded placeholder",
       "{" not in atxt and "}" not in atxt)
 check("link pin: /security intro has no unexpanded placeholder",
       "{" not in bot.WALLET_SECURITY_INTRO and "}" not in bot.WALLET_SECURITY_INTRO)
+
+# ============ Per-transaction detection (2026-10-31) ============
+# The owner's live case: an in and an out 69 seconds apart inside
+# one old 15-minute window surfaced as ONE netted alert line.
+# Real on-chain numbers: IN 8CCB50EA... (height 31082048) netted
+# +98,500 LUNC after the 1.5% burn tax on 100,000 sent; OUT
+# D7685563... (height 31082059) spent 9,850 net + 150 tax +
+# 15.257545 fee = 10,015.257545. Baseline 2,071.940963 -> final
+# 90,556.683418; the old code's single line was +88,484.742455.
+WW_ADDR = "terra1kur3cr4vask4lgs3tr4gww7lr0zvc944gjfcqc"
+IN_HASH = "8CCB50EA0432057A25605BCF31AAC10617F12AE60C14BB808FA90761955C52F9"
+OUT_HASH = "D768556302D3A855ECE24561A2D3F1F2BA82D7BB7FAA56116C36DF481436B0B6"
+
+
+def _ev(t, **attrs):
+    return {"type": t, "attributes": [{"key": k, "value": v} for k, v in attrs.items()]}
+
+
+def _txresp(events):
+    return {"logs": [{"events": events}]}
+
+
+# Inbound events (simplified to the balance-relevant ones): the
+# sender's spend and the tax machinery belong to other parties —
+# only the wallet's own coin_received counts, 98,500 after tax.
+_in_resp = _txresp([
+    _ev("coin_spent", spender="the-sender", amount="100000000000uluna"),
+    _ev("coin_received", receiver=WW_ADDR, amount="98500000000uluna"),
+    _ev("coin_spent", spender="terra17xpfvakm2amg962yls6f84z3kell8c5lkaeqfa", amount="1500000000uluna"),
+])
+# Outbound events, faithful to the real tx: the wallet's three
+# coin_spent events are fee + burn tax + net-to-recipient; the
+# fee collector's onward splits are other parties' events.
+_out_resp = _txresp([
+    _ev("coin_spent", spender=WW_ADDR, amount="15257545uluna"),
+    _ev("coin_spent", spender=WW_ADDR, amount="150000000uluna", msg_index="0"),
+    _ev("coin_spent", spender=WW_ADDR, amount="9850000000uluna", msg_index="0"),
+    _ev("coin_received", receiver="terra1hjr335tu8perh0hmqnmmru4aw7llppl9a4svu7", amount="9850000000uluna", msg_index="0"),
+    _ev("coin_spent", spender="terra17xpfvakm2amg962yls6f84z3kell8c5lkaeqfa", amount="120000000uluna", msg_index="0"),
+])
+check("tx parse: inbound nets +98,500 LUNC (post-tax)",
+      bot.chain.tx_net_deltas(_in_resp, WW_ADDR) == {"uluna": 98500000000})
+check("tx parse: outbound nets -(9,850 net + 150 tax + 15.257545 fee)",
+      bot.chain.tx_net_deltas(_out_resp, WW_ADDR) == {"uluna": -10015257545})
+check("tx parse: unrelated wallet sees nothing",
+      bot.chain.tx_net_deltas(_out_resp, ADDR1) == {})
+
+_OLD = {"balances": {"uluna": "2071940963"}, "delegations": {}, "unbonding": {},
+        "cw20": {}, "nfts": {}, "_height": 31082040}
+_NEW = {"balances": {"uluna": "90556683418"}, "delegations": {}, "unbonding": {},
+        "cw20": {}, "nfts": {}, "_height": 31082070}
+_TXS = [{"hash": IN_HASH, "height": 31082048, "deltas": {"uluna": 98500000000}},
+        {"hash": OUT_HASH, "height": 31082059, "deltas": {"uluna": -10015257545}}]
+_merged = walletwatch.merge_tx_changes(walletwatch.diff_states(_OLD, _NEW), _OLD, _NEW, _TXS)
+_bal = [c for c in _merged if c["kind"] == "balance"]
+check("in+out in one window -> TWO balance lines, not one netted line", len(_bal) == 2)
+check("in line: running total + tx hash",
+      _bal[0]["old"] == "2071940963" and _bal[0]["new"] == "100571940963" and _bal[0].get("tx") == IN_HASH)
+check("out line: running total lands exactly on the new snapshot",
+      _bal[1]["old"] == "100571940963" and _bal[1]["new"] == "90556683418" and _bal[1].get("tx") == OUT_HASH)
+check("per-tx lines dedupe independently",
+      walletwatch.change_key(_bal[0]) != walletwatch.change_key(_bal[1]))
+_atxt2 = walletwatch.format_alert(WW_ADDR, _merged)
+check("alert shows BOTH moves with amounts",
+      "+98,500 LUNC" in _atxt2 and "-10,015.257545 LUNC" in _atxt2)
+check("alert links BOTH txs on Finder",
+      f"/tx/{IN_HASH}" in _atxt2 and f"/tx/{OUT_HASH}" in _atxt2)
+
+# Zero-net window: equal in and out — the plain diff sees nothing,
+# the tx rebuild must still alert both.
+_Z = {"balances": {"uluna": "5000000000"}, "delegations": {}, "unbonding": {}, "cw20": {}, "nfts": {}}
+_Z_TXS = [{"hash": "AAAA", "height": 10, "deltas": {"uluna": 5000000000}},
+          {"hash": "BBBB", "height": 11, "deltas": {"uluna": -5000000000}}]
+_z = walletwatch.merge_tx_changes(walletwatch.diff_states(_Z, _Z), _Z, _Z, _Z_TXS)
+check("zero-net in+out still alerts BOTH txs",
+      len([c for c in _z if c["kind"] == "balance"]) == 2)
+
+# Partial walk (the LCD didn't return the out tx): the rebuild
+# can't land on the snapshot, so the denom falls back to ONE plain
+# netted line — totals stay truthful, nothing is invented.
+_p = walletwatch.merge_tx_changes(walletwatch.diff_states(_OLD, _NEW), _OLD, _NEW, _TXS[:1])
+check("partial walk falls back to the single netted line (no tx attached)",
+      len(_p) == 1 and _p[0]["kind"] == "balance" and "tx" not in _p[0]
+      and _p[0]["old"] == "2071940963" and _p[0]["new"] == "90556683418")
+
+# Walk unavailable: the classic diff passes through untouched.
+_n = walletwatch.merge_tx_changes(walletwatch.diff_states(_OLD, _NEW), _OLD, _NEW, None)
+check("txs=None leaves the classic diff untouched",
+      len(_n) == 1 and _n[0]["kind"] == "balance" and "tx" not in _n[0])
+
+check("wallet sweep interval is 60 seconds", bot._WW_INTERVAL == 60)
 
 # Static pin for the whole habit: no plain (non-f-string) string
 # literal in bot.py / walletwatch.py may carry a "{name}" token —

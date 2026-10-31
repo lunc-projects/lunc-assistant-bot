@@ -1,6 +1,6 @@
 """Live Terra Classic data — all endpoints verified 2026-10-21 via PublicNode LCD + CoinGecko.
 Standalone: generic public chain data only, no project-specific info."""
-import base64, json, os
+import base64, json, os, re, urllib.parse
 import httpx
 LCD = "https://terra-classic-lcd.publicnode.com"
 
@@ -197,3 +197,68 @@ async def contract_kind(contract):
     try:
         await cw721_num_tokens(contract); return "cw721"
     except Exception: return None
+
+# --- Wallet Security tx walk (2026-10-31): per-transaction balance
+# detection. A snapshot diff alone nets an in+out inside one sweep
+# window into a single unexplained line; the walk lists the window's
+# actual txs so each one can alert on its own line. ---
+
+async def latest_height():
+    d = await _get("/cosmos/base/tendermint/v1beta1/blocks/latest")
+    return int(d["block"]["header"]["height"])
+
+_COIN_RE = re.compile(r"^(\d+)(.+)$")
+
+def _coin_amounts(s):
+    """'15257545uluna' / '1uluna,2uusd' -> {denom: int}."""
+    out = {}
+    for part in str(s).split(","):
+        m = _COIN_RE.match(part.strip())
+        if m: out[m.group(2)] = out.get(m.group(2), 0) + int(m.group(1))
+    return out
+
+def tx_net_deltas(tx_response, address):
+    """Net bank-balance effect of one tx on `address`, per denom —
+    summed from the tx's own coin_received / coin_spent events.
+    Fee and burn-tax spends are coin_spent events too, so the
+    totals reconcile exactly with balance snapshots. Events of
+    every other party (sender, fee collector, recipient) are
+    ignored. Pure parsing, no network."""
+    events = []
+    for log in tx_response.get("logs") or []:
+        events += log.get("events") or []
+    if not events:
+        events = tx_response.get("events") or []
+    deltas = {}
+    for e in events:
+        t = e.get("type")
+        if t not in ("coin_received", "coin_spent"): continue
+        attrs = {a.get("key"): a.get("value") for a in e.get("attributes", [])}
+        party = attrs.get("receiver") if t == "coin_received" else attrs.get("spender")
+        if party != address: continue
+        sign = 1 if t == "coin_received" else -1
+        for denom, amt in _coin_amounts(attrs.get("amount", "")).items():
+            deltas[denom] = deltas.get(denom, 0) + sign * amt
+    return {d: v for d, v in deltas.items() if v}
+
+async def recent_wallet_txs(addr, after_height, upto_height=None):
+    """Every tx in (after_height, upto_height] that moved `addr`'s
+    bank balances, oldest first: [{hash, height, deltas}]. Found
+    via the wallet's own coin_received / coin_spent events, so
+    sends, receives, reward claims and fee spends are all covered.
+    RAISES on LCD failure — the caller falls back to plain
+    snapshot diffing."""
+    found = {}
+    for ev, attr in (("coin_received", "receiver"), ("coin_spent", "spender")):
+        q = f"{ev}.{attr}='{addr}' AND tx.height>{int(after_height)}"
+        if upto_height is not None: q += f" AND tx.height<={int(upto_height)}"
+        d = await _get("/cosmos/tx/v1beta1/txs?query=" + urllib.parse.quote(q) + "&order_by=ORDER_BY_ASC")
+        for tr in d.get("tx_responses", []):
+            found[tr["txhash"]] = tr
+    out = []
+    for tr in found.values():
+        deltas = tx_net_deltas(tr, addr)
+        if deltas:
+            out.append({"hash": tr["txhash"], "height": int(tr["height"]), "deltas": deltas})
+    out.sort(key=lambda t: (t["height"], t["hash"]))
+    return out
