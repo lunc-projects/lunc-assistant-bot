@@ -2371,7 +2371,7 @@ async def on_watch(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         elif res == "exists":
             await msg.reply_text(f"🛡️ Already watching {a} — snapshot refreshed, alerts on.\nFull view: https://finder.terraclassic.community/mainnet/account/{a}")
         else:
-            await msg.reply_text(f"🛡️ Watching {a}\nStarting snapshot taken — I'll DM you here whenever its balances, staking, unbonding" + (" or attached tokens/NFTs" if contracts else "") + " change (checks about every 15 minutes).\nFull view: https://finder.terraclassic.community/mainnet/account/{a}")
+            await msg.reply_text(f"🛡️ Watching {a}\nStarting snapshot taken — I'll DM you here whenever its balances, staking, unbonding" + (" or attached tokens/NFTs" if contracts else "") + f" change (checks about every 15 minutes).\nFull view: https://finder.terraclassic.community/mainnet/account/{a}")
         return
     if walletwatch.validate_contract_address(a):
         wallets = store.wallet_watch_list(uid)

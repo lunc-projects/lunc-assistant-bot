@@ -559,6 +559,98 @@ check("intro names the feature Wallet Security",
 check("intro is honest about detection-only", "cannot prevent or reverse" in bot.WALLET_SECURITY_INTRO)
 check("intro states read-only / no keys", "never ask for a seed phrase" in bot.WALLET_SECURITY_INTRO)
 
+# ============ Finder links: full address, never a placeholder ====
+# Regression pin (2026-10-30, owner's live test): the /watch success
+# reply built its "Full view" URL in a plain (non-f-string) segment,
+# so the user got ".../account/{a}" — a dead link. Every
+# wallet-security message must carry the FULL address in its finder
+# URL and no unexpanded "{...}" placeholder anywhere.
+FINDER = "https://finder.terraclassic.community/mainnet"
+
+bot.fetch_wallet_state = _fake_fetch
+try:
+    replies.clear()
+    asyncio.run(bot.on_watch(_upd("private", 4242, [ADDR1]), NS(args=[ADDR1])))
+    r = replies[-1]
+    check("link pin: fresh /watch reply has the FULL address finder URL",
+          f"{FINDER}/account/{ADDR1}" in r)
+    check("link pin: fresh /watch reply has no unexpanded placeholder",
+          "{" not in r and "}" not in r)
+
+    replies.clear()
+    asyncio.run(bot.on_watch(_upd("private", 4242, [ADDR1]), NS(args=[ADDR1])))
+    r = replies[-1]
+    check("link pin: re-watch (exists) reply has the FULL address finder URL",
+          f"{FINDER}/account/{ADDR1}" in r)
+    check("link pin: re-watch reply has no unexpanded placeholder",
+          "{" not in r and "}" not in r)
+
+    replies.clear()
+    asyncio.run(bot.on_watching(_upd("private", 4242, []), NS(args=[])))
+    r = replies[-1]
+    check("link pin: /watching lists the FULL address finder URL",
+          f"{FINDER}/account/{ADDR1}" in r)
+    check("link pin: /watching has no unexpanded placeholder",
+          "{" not in r and "}" not in r)
+
+    # Attach-contract branch (kind lookup stubbed: no network here).
+    async def _fake_kind(addr):
+        return "cw20"
+    _real_kind = bot.chain.contract_kind
+    bot.chain.contract_kind = _fake_kind
+    try:
+        replies.clear()
+        asyncio.run(bot.on_watch(_upd("private", 4242, [CONTRACT1]), NS(args=[CONTRACT1])))
+        r = replies[-1]
+    finally:
+        bot.chain.contract_kind = _real_kind
+    check("link pin: attach reply has the FULL contract finder URL",
+          f"{FINDER}/account/{CONTRACT1}" in r)
+    check("link pin: attach reply has no unexpanded placeholder",
+          "{" not in r and "}" not in r)
+finally:
+    bot.fetch_wallet_state = _real_fetch
+
+# Alert DMs across every change kind (normal + found-on-return).
+_all = (walletwatch.diff_states(BASE, s2) + walletwatch.diff_states(BASE, s3)
+        + walletwatch.diff_states(BASE, s6) + walletwatch.diff_states(BASE, s7))
+atxt = walletwatch.format_alert(ADDR1, _all) + walletwatch.format_alert(ADDR1, _all, away=True)
+check("link pin: alert DM has full wallet + token + validator finder URLs",
+      f"/account/{ADDR1}" in atxt and f"/account/{CONTRACT1}" in atxt
+      and f"/validator/{VALOPER}" in atxt)
+check("link pin: alert DM has no unexpanded placeholder",
+      "{" not in atxt and "}" not in atxt)
+check("link pin: /security intro has no unexpanded placeholder",
+      "{" not in bot.WALLET_SECURITY_INTRO and "}" not in bot.WALLET_SECURITY_INTRO)
+
+# Static pin for the whole habit: no plain (non-f-string) string
+# literal in bot.py / walletwatch.py may carry a "{name}" token —
+# that is exactly how the dead {a} link shipped. (lang.py templates
+# are exempt by design: lang.t() .format()s them at the call site,
+# and both call sites pass name=.)
+import ast as _ast
+import re as _re
+
+_TOKEN_RE = _re.compile(r"\{[A-Za-z_][A-Za-z0-9_.\[\]'\"]*\}")
+
+
+def _plain_placeholder_hits(fname):
+    tree = _ast.parse(open(os.path.join(ROOT, fname), encoding="utf-8").read())
+    joined = set()
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.JoinedStr):
+            for v in node.values:
+                joined.add(id(v))
+    return [node.lineno for node in _ast.walk(tree)
+            if isinstance(node, _ast.Constant) and isinstance(node.value, str)
+            and id(node) not in joined and _TOKEN_RE.search(node.value)]
+
+
+check("link pin: bot.py has no plain-string placeholders",
+      _plain_placeholder_hits("bot.py") == [])
+check("link pin: walletwatch.py has no plain-string placeholders",
+      _plain_placeholder_hits("walletwatch.py") == [])
+
 print()
 if fails:
     print("FAILURES:", len(fails))
