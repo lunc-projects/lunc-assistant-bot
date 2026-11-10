@@ -150,9 +150,34 @@ def parse_summary_args(args, chat_id):
     try: return store.get_messages(chat_id, limit=int(a)), detailed
     except: return store.get_messages(chat_id, limit=200), detailed
 
-async def send_long(update, text):
-    for i in range(0, len(text), 3900):
-        await update.effective_message.reply_text(text[i:i+3900])
+def _line_chunks(text, limit=3900):
+    """Split on line boundaries — never inside a normal line, so a Markdown
+    link can never be cut in half. A single line longer than the limit
+    (pathological) is hard-split, so NO returned chunk ever exceeds the
+    limit: a send built from these chunks cannot be rejected by Telegram
+    as too long."""
+    lines = []
+    for line in text.splitlines():
+        while len(line) > limit:
+            lines.append(line[:limit]); line = line[limit:]
+        lines.append(line)
+    chunks, cur = [], ""
+    for line in lines:
+        if cur and len(cur) + 1 + len(line) > limit:
+            chunks.append(cur); cur = line
+        else:
+            cur = f"{cur}\n{line}" if cur else line
+    if cur:
+        chunks.append(cur)
+    return chunks or [text]
+
+async def send_long(update, text, parse_mode=None):
+    """Send text of any length as sequential messages, each safely under
+    Telegram's 4096-char limit (chunks capped at 3900, split on line
+    boundaries). Use for EVERY reply that can grow — /help, lists,
+    summaries."""
+    for ch in _line_chunks(text):
+        await update.effective_message.reply_text(ch, parse_mode=parse_mode)
 
 USAGE_HONESTY_NOTE = ("Counts are what the bot has actually seen since usage tracking began. "
     "Telegram gives bots no list of their chats, so a group that never sends anything — and was "
@@ -391,7 +416,10 @@ async def on_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(lang_mod.t("intro", lg), reply_markup=lang_mod.lang_keyboard())
 
 async def on_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.effective_message.reply_text(HELP, parse_mode=ParseMode.MARKDOWN)
+    # HELP is 6,578 chars — OVER Telegram's 4096-char limit. Sent raw, this
+    # was rejected live with BadRequest "Message is too long" (owner alert
+    # 2026-11-09 01:30 UTC). Always send it chunked via send_long.
+    await send_long(update, HELP, parse_mode=ParseMode.MARKDOWN)
 
 async def on_language(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lg = user_lang(update)
