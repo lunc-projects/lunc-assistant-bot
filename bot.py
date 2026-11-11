@@ -3196,12 +3196,31 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # can't spam him. Honest limit: if the whole process dies (Railway
 # outage), the bot can't report its own death — that's an outside
 # watchdog's job, like the Garuda bot has.
+# Transient network errors (2026-11-11): a dropped LCD/Telegram read
+# recovers on its own, so single occurrences NEVER DM the owner —
+# they are counted and logged, and only a persistent pattern (>=5 of
+# the same class in 30 min, or the class still recurring after 2h)
+# earns ONE summary DM, then 6h of silence for that class. Real
+# problems (bugs, crashes, config) alert immediately, unchanged.
 ALERTS = alerts_mod.AlertThrottler()
+TRANSIENTS = alerts_mod.TransientErrorTracker()
 
 async def _alert_owner(bot, where, err):
     if not OWNER_ID: return
+    now = int(time.time())
+    if alerts_mod.is_transient_network_error(err):
+        cls = type(err).__name__
+        r = TRANSIENTS.record(cls, now)
+        print(f"TRANSIENT {cls} in {where}: suppressed (owner alert hygiene 2026-11-11) — "
+              f"{r['count_window']} in 30m, {r['count_hour']} in 1h, {r['count_today']} today"
+              + (" — persistent: summary alert sent" if r["alert"] else ""))
+        if r["alert"]:
+            try:
+                await bot.send_message(OWNER_ID, f"⚠️ Bot issue — network hiccups ongoing: {r['count_hour']} {cls} errors in the last hour ({r['count_today']} today). The bot is still running and recovering on its own — single network drops no longer alert you; real problems still alert immediately. Next summary for this no sooner than 6 hours from now.")
+            except Exception: pass
+        return
     key = f"{where}:{type(err).__name__}"
-    if not ALERTS.allow(key, int(time.time())): return
+    if not ALERTS.allow(key, now): return
     when = datetime.datetime.now(datetime.timezone.utc).strftime("%H:%M UTC")
     try:
         await bot.send_message(OWNER_ID, f"⚠️ Bot issue — {where}\n{type(err).__name__}: {str(err)[:300]}\nTime: {when}\nThe bot is still running — this is an alert, not a crash report. The same problem won't re-alert for an hour.")
