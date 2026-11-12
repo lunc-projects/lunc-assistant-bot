@@ -1088,9 +1088,10 @@ async def on_aioff(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # --- Auto-translate (groups, 2026-11-11) ---
 # Clearly non-English group messages get an English reply-quote
-# (translate.py: free engine, strict spam guards, silent failures).
+# (translate.py: free Google engine primary, bot AI as fallback under a
+# 25k/day translation sub-budget, strict spam guards, silent failures).
 # Group admins toggle per chat with /translate on|off (default on).
-TRANSLATOR = translate_mod.Translator()
+TRANSLATOR = translate_mod.Translator(use_ai=AI_ENABLED)
 
 async def on_translate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat

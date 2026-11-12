@@ -3,7 +3,13 @@ decisions with a mocked getter, cooldown/cap/cache gates, the per-chat
 store toggle, and bot-level wiring (toggle off = silent, PM explains,
 non-admin cannot flip the switch).
 
-No network: the translation getter is injected everywhere.
+v2 (same day): the AI second engine — output parsing (English
+sentinel, refusal), engine order (Google primary; AI on Google
+failure/echo; AI never for long messages), use_ai=False == v1, and
+the translation token sub-budget (accounting, full refund on
+failure, AI stops when spent, UTC-midnight reset).
+
+No network: both engine getters are injected everywhere.
 Run: python3 test_translate.py"""
 import asyncio
 import os
@@ -154,47 +160,65 @@ def make_getter(response=None, exc=None):
     return getter
 
 
+async def no_ai(text):
+    """AI engine that never answers — pins the Google path in tests,
+    whatever the environment (tests must never spend real AI calls)."""
+    return None
+
+
+ai_calls = []
+
+
+def make_ai(response=None, exc=None):
+    async def ai_getter(text):
+        ai_calls.append(text)
+        if exc:
+            raise exc
+        return response
+    return ai_getter
+
+
 TURK = "Klavye ayarlarını değiştirebilirsin"
 
 del calls[:]
-t = tr.Translator(getter=make_getter(GTX_TR))
+t = tr.Translator(ai_getter=no_ai, getter=make_getter(GTX_TR))
 out = run(t.translate(TURK, chat_id=-1, user_id=7, now=1000))
 check(out == "You can change keyboard settings", "Turkish message gets its translation")
 check(len(calls) == 1, "getter called once")
 
 # English detected by the engine -> silent
 GTX_EN = [[["The vote ends tomorrow", "The vote ends tomorrow", None, None, 5]], None, "en"]
-t = tr.Translator(getter=make_getter(GTX_EN))
+t = tr.Translator(ai_getter=no_ai, getter=make_getter(GTX_EN))
 check(run(t.translate("The vote ends tomorrow morning", -1, 7, now=1000)) is None,
       "English (detected en) skipped")
 
 # Echo result -> silent
 GTX_ECHO = [[["Gracias a todos por venir", "Gracias a todos por venir", None, None, 1]], None, "es"]
-t = tr.Translator(getter=make_getter(GTX_ECHO))
+t = tr.Translator(ai_getter=no_ai, getter=make_getter(GTX_ECHO))
 check(run(t.translate("Gracias a todos por venir", -1, 7, now=1000)) is None,
       "echo translation skipped")
 
 # Engine failure -> silent, no exception
-t = tr.Translator(getter=make_getter(exc=RuntimeError("boom")))
+t = tr.Translator(ai_getter=no_ai, getter=make_getter(exc=RuntimeError("boom")))
 check(run(t.translate(TURK, -1, 7, now=1000)) is None, "engine exception is silent")
-t = tr.Translator(getter=make_getter(None))
+t = tr.Translator(ai_getter=no_ai, getter=make_getter(None))
 check(run(t.translate(TURK, -1, 7, now=1000)) is None, "engine None is silent")
 
 # Guards short-circuit before any HTTP
 del calls[:]
-t = tr.Translator(getter=make_getter(GTX_TR))
+t = tr.Translator(ai_getter=no_ai, getter=make_getter(GTX_TR))
 check(run(t.translate("/help me please now", -1, 7, now=1000)) is None and not calls,
       "guarded messages never reach the engine")
 
 # ---------- cooldown / cap / cache ----------
-t = tr.Translator(getter=make_getter(GTX_TR))
+t = tr.Translator(ai_getter=no_ai, getter=make_getter(GTX_TR))
 run(t.translate(TURK, -1, 7, now=1000))
 check(run(t.translate("Başka bir cümle kuruyorum şimdi", -1, 7, now=1010)) is None,
       "same user inside 30s cooldown is skipped")
 check(run(t.translate("Başka bir cümle kuruyorum şimdi", -1, 7, now=1031)) is not None,
       "same user after cooldown is translated")
 
-t = tr.Translator(getter=make_getter(GTX_TR), hourly_cap=3)
+t = tr.Translator(ai_getter=no_ai, getter=make_getter(GTX_TR), hourly_cap=3)
 outs = [run(t.translate(f"Cümle numara {i} burada geçiyor", -5, 100 + i, now=2000 + i * 40))
         for i in range(4)]
 check(outs[:3] != [None] * 3 and outs[3] is None, "chat hourly cap stops the 4th translation")
@@ -204,7 +228,7 @@ check(run(t.translate("Cümle numara dokuz burada", -5, 200, now=2000 + 3601)) i
       "cap window slides after an hour")
 
 del calls[:]
-t = tr.Translator(getter=make_getter(GTX_TR))
+t = tr.Translator(ai_getter=no_ai, getter=make_getter(GTX_TR))
 run(t.translate(TURK, -1, 7, now=1000))
 out = run(t.translate(TURK, -1, 8, now=2000))  # different user, later
 check(out == "You can change keyboard settings" and len(calls) == 1,
@@ -221,7 +245,7 @@ check(store.translate_enabled(-100) is True, "toggled back on reads on")
 # ---------- bot-level wiring ----------
 import bot
 
-bot.TRANSLATOR = tr.Translator(getter=make_getter(GTX_TR))
+bot.TRANSLATOR = tr.Translator(ai_getter=no_ai, getter=make_getter(GTX_TR))
 
 
 class FakeMsg:
@@ -298,6 +322,114 @@ run(bot.on_translate(upd, types.SimpleNamespace(bot=FakeBot("administrator"), ar
 check(store.translate_enabled(-100) is True, "admin toggles translate back on")
 
 check("/translate on/off" in bot.HELP, "help carries the translate line")
+
+# ---------- v2: AI output parsing ----------
+check(tr.parse_ai_output("[[ENGLISH]]") == ("english", None), "AI sentinel means English")
+check(tr.parse_ai_output("  [[ENGLISH]].") == ("english", None),
+      "sentinel with trailing dot still English")
+check(tr.parse_ai_output("Merhaba dünya") == ("ok", "Merhaba dünya"),
+      "AI translation passes through")
+check(tr.parse_ai_output("") is None and tr.parse_ai_output(None) is None
+      and tr.parse_ai_output("   ") is None, "empty AI reply is a failure")
+check(tr.parse_ai_output("I'm sorry, I can't translate that.") is None,
+      "AI refusal is a failure, not a translation")
+
+# ---------- v2: engine order — Google primary, AI fallback ----------
+# (The AI is the fallback until the live Groq-vs-gtx quality proof is
+# run — see translate.py's header. These tests pin the order.)
+AI_TR = "You can change your keyboard settings"
+GTX_FAIL = make_getter(exc=RuntimeError("gtx down"))
+
+del calls[:]; del ai_calls[:]
+t = tr.Translator(getter=make_getter(GTX_TR), ai_getter=make_ai(AI_TR))
+out = run(t.translate(TURK, -1, 7, now=1000))
+check(out == "You can change keyboard settings" and not ai_calls,
+      "Google success -> Google translation, AI untouched")
+
+del calls[:]; del ai_calls[:]
+t = tr.Translator(getter=GTX_FAIL, ai_getter=make_ai(AI_TR))
+out = run(t.translate(TURK, -1, 7, now=1000))
+check(out == AI_TR and len(ai_calls) == 1,
+      "Google failure -> AI translation used")
+
+t = tr.Translator(getter=make_getter(None), ai_getter=make_ai(AI_TR))
+check(run(t.translate(TURK, -1, 7, now=1000)) == AI_TR,
+      "Google empty reply -> AI translation used")
+
+del ai_calls[:]
+t = tr.Translator(getter=make_getter(GTX_ECHO), ai_getter=make_ai(AI_TR))
+out = run(t.translate("Gracias a todos por venir", -1, 7, now=1000))
+check(out == AI_TR and len(ai_calls) == 1,
+      "Google echo (misdetection) -> AI gets its chance")
+
+del ai_calls[:]
+t = tr.Translator(getter=make_getter(GTX_EN), ai_getter=make_ai(AI_TR))
+check(run(t.translate("The vote ends tomorrow morning", -1, 7, now=1000)) is None
+      and not ai_calls,
+      "Google-detected English stays silent, AI untouched")
+
+t = tr.Translator(getter=GTX_FAIL, ai_getter=make_ai("[[ENGLISH]]"))
+check(run(t.translate("The vote ends tomorrow morning", -1, 7, now=1000)) is None,
+      "AI English sentinel (after Google failure) stays silent")
+
+for label, ai in [("exception", make_ai(exc=RuntimeError("boom"))),
+                  ("None", make_ai(None)),
+                  ("refusal", make_ai("I'm sorry, I can't help with that.")),
+                  ("echo", make_ai(TURK))]:
+    t = tr.Translator(getter=GTX_FAIL, ai_getter=ai)
+    check(run(t.translate(TURK, -1, 7, now=1000)) is None,
+          f"Google down + AI {label} -> silent (exactly v1's failure mode)")
+
+del ai_calls[:]
+long_text = " ".join(["kelime"] * 130)  # ~900 chars, passes the guards
+t = tr.Translator(getter=GTX_FAIL, ai_getter=make_ai(AI_TR))
+check(run(t.translate(long_text, -1, 7, now=1000)) is None and not ai_calls,
+      "long message never tried on the AI (250-token output cap)")
+
+del ai_calls[:]
+t = tr.Translator(getter=GTX_FAIL, ai_getter=make_ai(AI_TR), use_ai=False)
+check(run(t.translate(TURK, -1, 7, now=1000)) is None and not ai_calls
+      and t.ai_spent(1000) == 0,
+      "use_ai=False is exactly v1 (no AI, no budget movement)")
+
+# ---------- v2: translation sub-budget accounting ----------
+t = tr.Translator(getter=GTX_FAIL, ai_getter=make_ai(AI_TR))
+run(t.translate(TURK, -1, 7, now=1000))
+exp_in = (len(tr.TRANSLATE_SYSTEM) + tr.AI_RULES_CHARS + len(TURK)) // 4
+exp_out = min(tr.AI_MAX_OUTPUT_TOKENS, len(AI_TR) // 4 + 1)
+check(t.ai_spent(1000) == exp_in + exp_out,
+      f"budget accounting: spent == input est + actual output ({exp_in}+{exp_out})")
+
+t = tr.Translator(getter=GTX_FAIL, ai_getter=make_ai(exc=RuntimeError("boom")))
+run(t.translate(TURK, -1, 7, now=1000))
+check(t.ai_spent(1000) == 0, "failed AI call refunds the budget in full")
+
+del ai_calls[:]
+t = tr.Translator(getter=GTX_FAIL, ai_getter=make_ai(AI_TR),
+                  ai_daily_cap=tr.Translator._ai_estimate(TURK))
+run(t.translate(TURK, -1, 7, now=1000))
+check(len(ai_calls) == 1, "first AI fallback used within budget")
+check(run(t.translate("Başka bir cümle kuruyorum şimdi", -1, 8, now=2000)) is None
+      and len(ai_calls) == 1,
+      "sub-budget spent -> AI no longer tried (Google primary unaffected)")
+run(t.translate("Yarın yine gelirim buraya", -1, 9, now=1000 + 90000))
+check(len(ai_calls) == 2, "sub-budget resets at UTC midnight")
+
+del ai_calls[:]
+t = tr.Translator(getter=GTX_FAIL, ai_getter=make_ai(AI_TR))
+run(t.translate(TURK, -1, 7, now=1000))
+out = run(t.translate(TURK, -1, 8, now=2000))
+check(out == AI_TR and len(ai_calls) == 1,
+      "AI translation served from cache on repeat")
+
+# ---------- v2: bot-level wiring with the AI engine ----------
+bot.TRANSLATOR = tr.Translator(getter=GTX_FAIL,
+                               ai_getter=make_ai(AI_TR), use_ai=True)
+store.set_translate_enabled(-100, True)
+upd = fake_update(TURK)
+run(bot.maybe_translate(upd, CTX))
+check(upd.message.replies == [AI_TR],
+      "bot falls back to the AI translation when Google is down")
 
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)
