@@ -62,6 +62,18 @@ def set_ai_enabled(chat_id, on):
     set_setting(chat_id, "ai_group", "on" if on else "off")
 
 
+# --- Per-group auto-translate switch (default ON in groups) ---
+# Group admins toggle with /translate on|off. When on, clearly
+# non-English group messages get an English reply (translate.py).
+# Never set = on. Private chats are not affected (groups only).
+def translate_enabled(chat_id):
+    return get_setting(chat_id, "translate_group", "on") != "off"
+
+
+def set_translate_enabled(chat_id, on):
+    set_setting(chat_id, "translate_group", "on" if on else "off")
+
+
 BURN_KEYS = ["burn_alerts", "burn_daily", "burn_big", "burn_rate"]
 def burn_settings(chat_id):
     return {k: get_setting(chat_id, k) for k in BURN_KEYS}

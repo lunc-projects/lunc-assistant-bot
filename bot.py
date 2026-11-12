@@ -14,7 +14,7 @@ try:
     from telegram.ext import TypeHandler
 except Exception:  # test stubs / very old PTB: the usage observer just stays off
     TypeHandler = None
-import store, ai_client, burn as burn_mod, chain, lang as lang_mod, ratelimit, budget, modquiz, topics, seclogic, alerts as alerts_mod, github_pr, stats_report, news as news_mod, walletwatch
+import store, ai_client, burn as burn_mod, chain, lang as lang_mod, ratelimit, budget, modquiz, topics, seclogic, alerts as alerts_mod, github_pr, stats_report, news as news_mod, walletwatch, translate as translate_mod
 from kb import kb_as_text, find_kb_answer
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -79,6 +79,7 @@ Rank is earned by chatting on distinct days (not message count). Owner: /rankset
 
 *AI in this group*
 Group admins can turn AI off or on for this group only: /aioff, /aion. Default is on.
+🌐 Auto-translate: in groups I reply to non-English messages with an English translation. Group admins: /translate on/off. Default is on.
 
 *Group protection (opt-in)*
 /protect — group admins: request scam protection for this group (the owner approves it)
@@ -1084,6 +1085,45 @@ async def on_aion(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def on_aioff(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await _ai_toggle(update, ctx, False)
+
+# --- Auto-translate (groups, 2026-11-11) ---
+# Clearly non-English group messages get an English reply-quote
+# (translate.py: free engine, strict spam guards, silent failures).
+# Group admins toggle per chat with /translate on|off (default on).
+TRANSLATOR = translate_mod.Translator()
+
+async def on_translate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if chat.type == "private":
+        await update.effective_message.reply_text("🌐 Auto-translate is a group feature: in a group, I reply to non-English messages with an English translation. It is on by default — group admins can switch it with /translate on or /translate off."); return
+    arg = (ctx.args[0].lower() if ctx.args else "")
+    if arg in ("on", "off"):
+        if not await _can_change(update, ctx):
+            await update.effective_message.reply_text("Only group admins can change this group's translate setting."); return
+        store.set_translate_enabled(chat.id, arg == "on")
+        await update.effective_message.reply_text(
+            "🌐 Auto-translate is ON for this group — non-English messages get an English reply." if arg == "on"
+            else "🌐 Auto-translate is OFF for this group. An admin can turn it back on with /translate on.")
+        return
+    state = "ON" if store.translate_enabled(chat.id) else "OFF"
+    await update.effective_message.reply_text(f"🌐 Auto-translate is {state} for this group. Group admins: /translate on · /translate off")
+
+async def maybe_translate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Last step of on_message for group text nothing else claimed.
+    Bots, channel posts and toggled-off chats stay silent; the
+    Translator's own guards handle content, cooldown and the cap."""
+    msg, user = update.message, update.effective_user
+    if not msg or not user or user.is_bot or getattr(msg, "sender_chat", None): return
+    if update.effective_chat.type not in ("group", "supergroup"): return
+    if not store.translate_enabled(update.effective_chat.id): return
+    try:
+        out = await TRANSLATOR.translate(msg.text, update.effective_chat.id, user.id)
+    except Exception as e:  # translate() never raises by design; belt + braces
+        print(f"[translate] unexpected error (silent): {type(e).__name__}: {e}")
+        return
+    if out:
+        try: await msg.reply_text(out)
+        except Exception: pass
 
 # --- Group protection (Phase 1 moderation, 2026-10-25) ---
 # Opt-in, owner-approved scam protection for Luna Classic groups,
@@ -3179,6 +3219,10 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 out = ai_client.DAILY_LIMIT_NOTE if budget.exhausted() else "AI isn't configured yet (no AI_API_KEY)."
             await send_long(update, out)
         return
+    # Auto-translate (groups): runs last, so protection, filters, FAQ,
+    # hashtags and mentions all keep priority over it.
+    if chat.type in ("group", "supergroup"):
+        await maybe_translate(update, ctx)
     # DM: any long text = summarize it
     if chat.type == "private" and len(text) > 600 and not text.startswith("/"):
         if not AI_ENABLED:
@@ -3339,6 +3383,7 @@ def main():
     app.add_handler(CommandHandler("privacy", on_privacy))
     app.add_handler(CommandHandler("aion", on_aion))
     app.add_handler(CommandHandler("aioff", on_aioff))
+    app.add_handler(CommandHandler("translate", on_translate))
     app.add_handler(CommandHandler("protect", on_protect))
     app.add_handler(CommandHandler("unprotect", on_unprotect))
     app.add_handler(CommandHandler("approve", on_approve))
