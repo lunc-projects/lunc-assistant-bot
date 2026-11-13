@@ -17,6 +17,7 @@ def _conn():
         user_id INTEGER PRIMARY KEY, lang TEXT)""")
     _ensure_rank_tables(c)
     _ensure_mod_tables(c)
+    _ensure_blocklist_tables(c)
     _ensure_usage(c)
     return c
 
@@ -536,6 +537,74 @@ def mod_action_count(actor, action, since_ts):
     n = c.execute("SELECT COUNT(*) FROM mod_log WHERE actor=? AND action=? AND ts>=?",
                   (actor, action, int(since_ts))).fetchone()[0]
     c.close(); return n
+
+# --- Permanent name blocklist (2026-11-13) ---------------------------
+# Usernames (lowercase, no @) that are banned ON SIGHT, forever. The
+# gbans/ai_bans tables key on numeric ids, but for most of the scam
+# network the bot has never seen the account post, so there is no id
+# to ban — Telegram gives bots no @username -> id lookup. This list
+# bridges that: the observer checks every acting user's @username
+# against it, and the moment one of these accounts shows up anywhere
+# the bot serves, its id is captured (name_blocklist_hits) and the
+# full ban lands. Rows are added at runtime only (owner /blockname,
+# or the not-found names from an owner list ban) — never seeded in
+# code. Hits are (username, user_id) pairings: one row the first time
+# a given account is seen under a blocked name, kept permanently.
+
+def _ensure_blocklist_tables(c):
+    c.execute("""CREATE TABLE IF NOT EXISTS name_blocklist(
+        username TEXT PRIMARY KEY, added_by INTEGER, reason TEXT, ts INTEGER)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS name_blocklist_hits(
+        username TEXT, user_id INTEGER, ts INTEGER,
+        PRIMARY KEY(username, user_id))""")
+
+def _blockname_norm(username):
+    return (username or "").strip().lstrip("@").lower()
+
+def blockname_add(username, added_by, reason):
+    """File a username on the permanent blocklist. Returns True when
+    the name is newly filed, False when it was already there (the
+    original row — reason/adder — is kept)."""
+    name = _blockname_norm(username)
+    if not name: return False
+    c = _conn()
+    cur = c.execute("INSERT OR IGNORE INTO name_blocklist(username, added_by, reason, ts) VALUES(?, ?, ?, ?)",
+                    (name, added_by, reason or "", int(_time.time())))
+    c.commit(); n = cur.rowcount; c.close(); return n > 0
+
+def blockname_remove(username):
+    name = _blockname_norm(username)
+    if not name: return 0
+    c = _conn()
+    cur = c.execute("DELETE FROM name_blocklist WHERE username=?", (name,))
+    c.commit(); n = cur.rowcount; c.close(); return n
+
+def blockname_get(username):
+    name = _blockname_norm(username)
+    if not name: return None
+    c = _conn()
+    r = c.execute("SELECT * FROM name_blocklist WHERE username=?", (name,)).fetchone()
+    c.close(); return r
+
+def blockname_all():
+    """Every filed name, oldest first, with its hit count (the number
+    of distinct accounts recorded under that name)."""
+    c = _conn()
+    rows = c.execute("""SELECT b.*,
+                        (SELECT COUNT(*) FROM name_blocklist_hits h
+                         WHERE h.username = b.username) AS hits
+                        FROM name_blocklist b ORDER BY b.ts, b.username""").fetchall()
+    c.close(); return rows
+
+def blockname_hit(username, user_id):
+    """Record the id<->name pairing permanently. Returns True the
+    first time THIS account is seen under this blocked name."""
+    name = _blockname_norm(username)
+    if not name or user_id is None: return False
+    c = _conn()
+    cur = c.execute("INSERT OR IGNORE INTO name_blocklist_hits(username, user_id, ts) VALUES(?, ?, ?)",
+                    (name, int(user_id), int(_time.time())))
+    c.commit(); n = cur.rowcount; c.close(); return n > 0
 
 # --- Fresh-account holds + ban appeals (2026-10-25 security round 2) ---
 

@@ -305,6 +305,121 @@ async def _autoban_ai_linkage(update, ctx):
                           offending_text=bad[-1]["text"] or "",
                           delete_ids=tuple(r["message_id"] for r in bad if r["message_id"]))
 
+# --- Permanent name blocklist (2026-11-13) ---------------------------
+# The 11 scam-network handles from the incident have mostly never
+# posted anywhere this bot serves, so there is no numeric id to put
+# on the gban list — Telegram gives bots no @username -> id lookup.
+# The name blocklist (store.name_blocklist) holds the NAMES instead:
+# the usage observer checks the acting user's @username against it on
+# every sighting in any chat, and a hit captures the id permanently
+# and lands the full ban (global + AI) on the spot. It keys ONLY on
+# the acting user's own username — never on message text — so a
+# member quoting or naming a blocked account is untouched. The owner
+# and the bot itself are exempt by id, and their names are refused at
+# add time too.
+
+async def _bot_username(ctx):
+    """The bot's own @username (lowercase, no @), or None."""
+    u = getattr(ctx.bot, "username", None)
+    if u: return str(u).lstrip("@").lower()
+    gm = getattr(ctx.bot, "get_me", None)
+    if gm is not None:
+        try:
+            me = await gm()
+            u = getattr(me, "username", None)
+            if u: return str(u).lstrip("@").lower()
+        except Exception:
+            pass
+    return None
+
+async def _blockname_refused(ctx, name):
+    """True when a name must never be blocklisted: it resolves (from
+    the bot's own records) to the owner or the bot, or it IS the
+    bot's own @username. Belt and braces — the sighting check exempts
+    owner/bot by id regardless of what is filed."""
+    key = (name or "").strip().lstrip("@").lower()
+    if not key: return True
+    hit = store.resolve_username(key)
+    if hit is not None:
+        uid, _match = hit
+        if _is_owner(uid): return True
+        bot_id = getattr(ctx.bot, "id", None)
+        if bot_id is not None and uid == bot_id: return True
+    bu = await _bot_username(ctx)
+    if bu and key == bu: return True
+    return False
+
+async def _blocklist_strike(ctx, chat, user, name, msg=None):
+    """Full permanent strike for a blocklist hit: global ban + AI ban
+    (both recorded against the blocked name), removal from the
+    sighting group and every protected group, the triggering group
+    message deleted, a mod_log entry, and the owner DM with the 🚩
+    Report button. Never raises."""
+    uid = user.id
+    row = None
+    try: row = store.blockname_get(name)
+    except Exception: pass
+    filed_reason = (row["reason"] if row else "") or ""
+    ban_reason = f"name blocklist: @{name}" + (f" — {filed_reason}" if filed_reason else "")
+    try: store.gban_add(uid, ban_reason, OWNER_ID)
+    except Exception: pass
+    try: store.ai_ban_add(uid, ban_reason, OWNER_ID)
+    except Exception: pass
+    chat_id = getattr(chat, "id", None)
+    if chat is not None and getattr(chat, "type", None) in ("group", "supergroup"):
+        try: await ctx.bot.ban_chat_member(chat.id, uid)
+        except Exception: pass
+        if msg is not None:
+            try: await ctx.bot.delete_message(chat.id, msg.message_id)
+            except Exception: pass
+    try: await _apply_gban(ctx, uid, True)
+    except Exception: pass
+    try: store.mod_log_add(0, "blocklist-hit", uid, chat_id, f"@{name}")
+    except Exception: pass
+    print(f"[blocklist] hit: @{name} (user {uid}) in chat {chat_id} — banned everywhere, permanently")
+    if OWNER_ID:
+        if chat is not None and getattr(chat, "type", None) == "private":
+            where = "a DM with the bot"
+        else:
+            where = (getattr(chat, "title", None) if chat is not None else None) or str(chat_id)
+        note = (f"🚫 Blocklist hit: @{name} ({uid}) just showed up in {where} "
+                f"— banned everywhere, permanently.")
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton(
+            "🚩 Report them",
+            url=autoban.report_url(getattr(user, "username", None), uid))]])
+        try: await ctx.bot.send_message(OWNER_ID, note, reply_markup=kb)
+        except Exception: pass
+
+async def _blocklist_check(update, ctx):
+    """Sighting check for the permanent name blocklist — called from
+    the usage observer (group -1) on every update. Fires for ANY
+    acting user (message, edit, button tap, join…) whose own
+    @username is filed. Quiet once handled: when this exact account
+    was already recorded under the name AND is already globally
+    banned, repeat sightings do nothing. Never raises."""
+    try:
+        user = update.effective_user
+        if user is None: return
+        uname = getattr(user, "username", None)
+        if not uname: return
+        if _is_owner(user.id): return
+        bot_id = getattr(ctx.bot, "id", None)
+        if bot_id is not None and user.id == bot_id: return
+        name = str(uname).strip().lstrip("@").lower()
+        if store.blockname_get(name) is None: return
+        new_pairing = store.blockname_hit(name, user.id)
+        if not new_pairing and store.gban_get(user.id) is not None:
+            return  # already captured and banned — stay quiet
+        msg = None
+        for cand in (getattr(update, "message", None),
+                     getattr(update, "edited_message", None)):
+            fu = getattr(cand, "from_user", None) if cand is not None else None
+            if fu is not None and getattr(fu, "id", None) == user.id:
+                msg = cand; break
+        await _blocklist_strike(ctx, update.effective_chat, user, name, msg=msg)
+    except Exception:
+        pass
+
 USAGE_HONESTY_NOTE = ("Counts are what the bot has actually seen since usage tracking began. "
     "Telegram gives bots no list of their chats, so a group that never sends anything — and was "
     "added before tracking started — stays invisible until it stirs.")
@@ -466,6 +581,12 @@ async def on_observe_update(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             record_user = False
         if user is not None and ctx is not None and getattr(ctx, "bot", None) is not None and user.id == ctx.bot.id:
             return  # never count the bot itself
+        if user is not None and ctx is not None and getattr(ctx, "bot", None) is not None:
+            # Permanent name blocklist: checked on EVERY sighting in
+            # ANY chat (groups and DMs), before the sighting is even
+            # recorded — a blocked @name gets the full strike the
+            # moment it shows up anywhere the bot serves.
+            await _blocklist_check(update, ctx)
         store.observe_update(
             chat_id=chat.id if chat is not None else None,
             chat_type=getattr(chat, "type", None) if chat is not None else None,
@@ -1528,6 +1649,16 @@ async def _list_ban(update, ctx, actor, at_names, extra_reason, full):
         banned.append(typed)
         if match_type == "display":
             display_matched.append(typed)
+    # Names the bot has never seen can't be banned today — but they
+    # are filed on the PERMANENT name blocklist, so the moment any of
+    # them shows up anywhere the bot serves, the sighting check bans
+    # them on the spot. That is how a pasted list outlives the reply.
+    filed = []
+    for typed in not_found:
+        if await _blockname_refused(ctx, typed[1:]):
+            continue
+        if store.blockname_add(typed[1:], actor, reason):
+            filed.append(typed)
     lines = ["🚫 List ban done."]
     if banned:
         lines.append(f"Banned {len(banned)}: " + ", ".join(
@@ -1542,6 +1673,9 @@ async def _list_ban(update, ctx, actor, at_names, extra_reason, full):
         lines.append("Not found: " + ", ".join(not_found) +
                      " — never seen by this bot, can't ban by name; "
                      "the auto-ban catches them if they ever post.")
+    if filed:
+        lines.append("Filed on the permanent blocklist: " + ", ".join(filed) +
+                     " — banned on sight if they ever show up.")
     await update.effective_message.reply_text("\n".join(lines))
 
 async def on_gban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1694,6 +1828,73 @@ async def on_aibans(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         lines.append(f"• {r['user_id']}" + (f" — {r['reason']}" if r["reason"] else "") + f" (by {r['banned_by']})")
     if len(rows) > 30: lines.append(f"…and {len(rows) - 30} more")
     await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+async def on_blocklist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Owner-only: the permanent name blocklist — @usernames banned
+    on sight, forever (see _blocklist_check). A security list, so it
+    is not shown to moderators."""
+    if not await _owner_only(update): return
+    rows = store.blockname_all()
+    if not rows:
+        await update.effective_message.reply_text("The permanent name blocklist is empty."); return
+    lines = [f"*Permanent name blocklist ({len(rows)})* — banned on sight, forever"]
+    for r in rows[:50]:
+        lines.append(f"• @{r['username']}" + (f" — {r['reason']}" if r["reason"] else "") + f" · {r['hits']} hit(s)")
+    if len(rows) > 50: lines.append(f"…and {len(rows) - 50} more")
+    await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+async def on_blockname(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Owner-only: file one or more @usernames on the permanent name
+    blocklist in a single paste (/blockname @a @b @c [reason]).
+    Words after the names become the reason, same convention as the
+    list bans. The owner's and the bot's own names are refused."""
+    if not await _owner_only(update): return
+    actor = update.effective_user.id
+    args = list(ctx.args or [])
+    at_names = [a for a in args if a.startswith("@")]
+    if not at_names:
+        await update.effective_message.reply_text("Usage: /blockname @name1 @name2 … [reason] — files names on the permanent blocklist; they're banned on sight if they ever show up."); return
+    reason = " ".join(a for a in args if not a.startswith("@")).strip() or "manual block"
+    seen, names = set(), []
+    for a in at_names:
+        key = a[1:].lower()
+        if key and key not in seen:
+            seen.add(key); names.append(a)
+    filed, already, refused = [], [], []
+    for typed in names:
+        if await _blockname_refused(ctx, typed[1:]):
+            refused.append(typed); continue
+        if store.blockname_add(typed[1:], actor, reason):
+            filed.append(typed)
+        else:
+            already.append(typed)
+    lines = []
+    if filed:
+        lines.append("🚫 Filed on the permanent blocklist: " + ", ".join(filed) + " — banned on sight if they ever show up.")
+    if already:
+        lines.append("Already on the blocklist: " + ", ".join(already))
+    if refused:
+        lines.append("Refused (you / the bot — those names can never be blocked): " + ", ".join(refused))
+    await update.effective_message.reply_text("\n".join(lines) if lines else "Nothing to file.")
+
+async def on_unblockname(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Owner-only: take names OFF the permanent blocklist."""
+    if not await _owner_only(update): return
+    at_names = [a for a in (ctx.args or []) if a.startswith("@")]
+    if not at_names:
+        await update.effective_message.reply_text("Usage: /unblockname @name1 @name2 …"); return
+    removed, missing = [], []
+    for typed in at_names:
+        if store.blockname_remove(typed[1:]):
+            removed.append(typed)
+        else:
+            missing.append(typed)
+    lines = []
+    if removed:
+        lines.append("✅ Removed from the permanent blocklist: " + ", ".join(removed))
+    if missing:
+        lines.append("Wasn't on the blocklist: " + ", ".join(missing))
+    await update.effective_message.reply_text("\n".join(lines))
 
 async def on_modlog(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _owner_only(update): return
@@ -3671,6 +3872,9 @@ def main():
     app.add_handler(CommandHandler("aiban", on_aiban))
     app.add_handler(CommandHandler("aiunban", on_aiunban))
     app.add_handler(CommandHandler("aibans", on_aibans))
+    app.add_handler(CommandHandler("blocklist", on_blocklist))
+    app.add_handler(CommandHandler("blockname", on_blockname))
+    app.add_handler(CommandHandler("unblockname", on_unblockname))
     app.add_handler(CommandHandler("modlog", on_modlog))
     app.add_handler(CommandHandler("appeal", on_appeal))
     app.add_handler(CommandHandler("elevate", on_elevate))

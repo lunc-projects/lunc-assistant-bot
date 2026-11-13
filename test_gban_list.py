@@ -217,8 +217,13 @@ async def main():
         "Already banned: @OldBanned\n"
         "Skipped (you / the bot): @OwnerHandle, @LuncAssistantBot\n"
         "Not found: @NeverSeenBot — never seen by this bot, can't ban by "
-        "name; the auto-ban catches them if they ever post.")
+        "name; the auto-ban catches them if they ever post.\n"
+        "Filed on the permanent blocklist: @NeverSeenBot — banned on "
+        "sight if they ever show up.")
     check("list: reply is exact", cmd.replies == [expected])
+    check("list: not-found name filed on the permanent blocklist",
+          store.blockname_get("neverseenbot") is not None
+          and store.blockname_get("neverseenbot")["added_by"] == OWNER)
     rows = [r for r in store.mod_log_recent(10) if r["action"] == "gban"]
     check("list: one mod_log row per new ban, with the typed name",
           len(rows) == 2
@@ -275,7 +280,7 @@ async def main():
 
 
 asyncio.run(main())
-TOTAL = 22
+TOTAL = 23
 print(f"\n{TOTAL - len(fails)}/{TOTAL} passed" if not fails
       else f"\nFAILED: {fails}")
 sys.exit(1 if fails else 0)
