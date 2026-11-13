@@ -1481,13 +1481,75 @@ async def _owner_mod_alert(ctx, text, undo_user_id=None):
     except Exception:
         pass
 
+async def _gban_list(update, ctx, actor, at_names, extra_reason):
+    """Owner-only bulk /gban by @username (see on_gban list mode).
+    Resolution comes from store.resolve_username — the bot's own
+    message log only. Telegram itself gives bots no way to resolve a
+    bare @username, so names the bot has never seen are reported back
+    verbatim as not found (the auto-ban catches those accounts if
+    they ever post in a group this bot serves)."""
+    reason = extra_reason.strip() or "global list ban"
+    bot_id = getattr(ctx.bot, "id", None)
+    seen, names = set(), []
+    for a in at_names:
+        key = a[1:].lower()
+        if key and key not in seen:
+            seen.add(key); names.append(a)
+    banned, display_matched, already, skipped, not_found = [], [], [], [], []
+    for typed in names:
+        hit = store.resolve_username(typed[1:])
+        if hit is None:
+            not_found.append(typed); continue
+        uid, match_type = hit
+        if _is_owner(uid) or (bot_id is not None and uid == bot_id):
+            skipped.append(typed); continue
+        if store.gban_get(uid) is not None:
+            already.append(typed); continue
+        store.gban_add(uid, reason, actor)
+        store.mod_log_add(actor, "gban", uid, update.effective_chat.id,
+                          f"{reason} (list ban: {typed})")
+        await _apply_gban(ctx, uid, True)
+        banned.append(typed)
+        if match_type == "display":
+            display_matched.append(typed)
+    lines = ["🚫 List ban done."]
+    if banned:
+        lines.append(f"Banned {len(banned)}: " + ", ".join(
+            n + (" *" if n in display_matched else "") for n in banned))
+    if display_matched:
+        lines.append("* matched on display name only — no @username on record for them.")
+    if already:
+        lines.append("Already banned: " + ", ".join(already))
+    if skipped:
+        lines.append("Skipped (you / the bot): " + ", ".join(skipped))
+    if not_found:
+        lines.append("Not found: " + ", ".join(not_found) +
+                     " — never seen by this bot, can't ban by name; "
+                     "the auto-ban catches them if they ever post.")
+    await update.effective_message.reply_text("\n".join(lines))
+
 async def on_gban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _can_moderate(update, ctx):
         await update.effective_message.reply_text("Only the owner, elevated users, or admins of a protected group can do this."); return
     actor = update.effective_user.id
+    # List mode (2026-11-13): /gban @name1 @name2 … — the owner pastes
+    # a list of @usernames (the scam-network case) and every name the
+    # bot can resolve from its own message log gets the normal global
+    # ban. Owner-only: bulk-by-name is a bigger gun than one reply-ban.
+    # A reply target still wins (same rule as _mod_target), so a
+    # reason that merely mentions an @name never hijacks a reply-ban.
+    _args = list(ctx.args or [])
+    _at_names = [a for a in _args if a.startswith("@")]
+    _has_reply = bool(update.message and update.message.reply_to_message)
+    if _at_names and not _has_reply:
+        if not _is_owner(actor):
+            await update.effective_message.reply_text("Owner only for list bans."); return
+        await _gban_list(update, ctx, actor, _at_names,
+                         " ".join(a for a in _args if not a.startswith("@")))
+        return
     target, reason = _mod_target(update, ctx)
     if not target:
-        await update.effective_message.reply_text("Usage: reply to the scammer's message with /gban [reason], or /gban <user_id> [reason]."); return
+        await update.effective_message.reply_text("Usage: reply to the scammer's message with /gban [reason], or /gban <user_id> [reason]. Owner list mode: /gban @name1 @name2 … bans every @name the bot has seen."); return
     if _is_owner(target):
         await update.effective_message.reply_text("That user can't be banned."); return
     if target == actor:

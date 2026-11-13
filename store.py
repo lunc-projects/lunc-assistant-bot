@@ -151,6 +151,48 @@ def get_messages(chat_id, limit=200, since_ts=None, after_id=None):
     c.close()
     return list(reversed(rows))
 
+def resolve_username(name):
+    """Resolve one @username (passed WITHOUT the @, any case) to a
+    user_id using ONLY this bot's own records — or return None.
+
+    The messages log is the only table that stores names at all
+    (usage_users, gbans, ai_bans and mod_log hold bare user ids), and
+    what messages.user_name actually holds (bot.py on_message) is:
+        "Full Name (@handle)"   — the user HAS a Telegram username
+        "Full Name"             — the user has none
+    Two honest match types, checked most-recent-row first:
+      "username" — the embedded (@handle) equals the name. A genuine
+                   @username match.
+      "display"  — no (@handle) part and the whole stored name equals
+                   the name: the user's DISPLAY name is spelled exactly
+                   like the handle. Weaker — display names are free
+                   text anyone can set — so callers label it as such.
+    Returns (user_id, match_type) or None. The log only retains
+    RETENTION_DAYS of history, so this resolves just the people the
+    bot has seen post recently — Telegram gives bots no other way to
+    turn a bare @username into an id."""
+    want = (name or "").strip().lstrip("@").lower()
+    if not want: return None
+    c = _conn()
+    rows = c.execute("SELECT user_id, user_name FROM messages "
+                     "WHERE user_name IS NOT NULL AND user_name != '' "
+                     "ORDER BY id DESC").fetchall()
+    c.close()
+    display_hit = None
+    for r in rows:
+        stored = r["user_name"]
+        if " (@" in stored and stored.endswith(")"):
+            full, handle = stored.rsplit(" (@", 1)
+            if handle[:-1].lower() == want:
+                return r["user_id"], "username"
+            if display_hit is None and full.strip().lower() == want:
+                display_hit = r["user_id"]
+        elif display_hit is None and stored.strip().lower() == want:
+            display_hit = r["user_id"]
+    if display_hit is not None:
+        return display_hit, "display"
+    return None
+
 def set_catchup(chat_id, user_id):
     rows = get_messages(chat_id, limit=1)
     last = rows[-1]["id"] if rows else 0
