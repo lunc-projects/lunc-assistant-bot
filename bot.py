@@ -14,7 +14,7 @@ try:
     from telegram.ext import TypeHandler
 except Exception:  # test stubs / very old PTB: the usage observer just stays off
     TypeHandler = None
-import store, ai_client, burn as burn_mod, chain, lang as lang_mod, ratelimit, budget, modquiz, topics, seclogic, alerts as alerts_mod, github_pr, stats_report, news as news_mod, walletwatch, translate as translate_mod, outbound
+import store, ai_client, burn as burn_mod, chain, lang as lang_mod, ratelimit, budget, modquiz, topics, seclogic, alerts as alerts_mod, github_pr, stats_report, news as news_mod, walletwatch, translate as translate_mod, outbound, autoban
 from kb import kb_as_text, find_kb_answer
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -205,16 +205,105 @@ def _install_outbound_guard():
     _guarded_send_message._outbound_guard = True
     _TgBot.send_message = _guarded_send_message
 
-async def _send_ai_text(update, text):
+async def _send_ai_text(update, text, ctx=None):
     """Send summary-family / AI text through the outbound sanitize:
     bare link/mention lines are stripped first; if nothing substantive
     remains, nothing is sent (logged instead) — the bot never posts an
-    empty husk or a link list (2026-11-13)."""
+    empty husk or a link list (2026-11-13). When ctx is passed and the
+    text died links-only in a group, the auto-ban linkage check runs:
+    a user whose own recent posts are the same link spam fed it to the
+    bot on purpose (see _autoban_ai_linkage)."""
     clean = outbound.sanitize_ai_text(text)
     if not clean:
         print(f"[outbound-guard] AI text sanitized to empty for chat {update.effective_chat.id} — nothing sent")
+        if ctx is not None:
+            await _autoban_ai_linkage(update, ctx)
         return
     await send_long(update, clean)
+
+# --- Auto-ban (2026-11-13): the incident attack patterns -------------
+# A non-admin, non-owner user in ANY group (protected or not) who
+# posts (a) a bare list of >= 2 bot links, (b) a second link-only
+# message inside 10 minutes, or (c) payment-scam bait with a contact
+# handle gets: messages deleted, a permanent ban in that group, the
+# same ban propagated to every other group the bot belongs to, and an
+# evidence DM to the owner with a one-tap 🚩 Report button. Pattern
+# matching is pure text (autoban.py); the admin check — the only API
+# call — runs only after a pattern matched. Everything is wrapped so
+# a moderation failure can never break the message handler.
+LINK_ONLY_TRACKER = autoban.LinkOnlyTracker()
+
+async def _autoban_exempt(ctx, chat, user):
+    """Owner, elevated users, the bot itself, and the group's own
+    admins/creator never auto-ban (same exemptions as the protection
+    block). Checked only after a pattern matched."""
+    if user is None:
+        return True
+    if _is_owner(user.id) or store.is_elevated(user.id):
+        return True
+    bot_id = getattr(ctx.bot, "id", None)
+    if bot_id is not None and user.id == bot_id:
+        return True
+    return await _is_group_admin(ctx, chat.id, user.id)
+
+async def _autoban_strike(ctx, chat, user, reason, offending_text, delete_ids=()):
+    """Delete + permanent ban + propagate + owner evidence DM.
+    Never raises."""
+    for mid in delete_ids:
+        try: await ctx.bot.delete_message(chat.id, mid)
+        except Exception: pass
+    try: await ctx.bot.ban_chat_member(chat.id, user.id)
+    except Exception: pass
+    propagated = 0
+    for cid in store.known_group_chat_ids():
+        if cid == chat.id: continue
+        try:
+            await ctx.bot.ban_chat_member(cid, user.id)
+            propagated += 1
+        except Exception: pass
+    try: store.mod_log_add(0, "auto-ban", user.id, chat.id,
+                            f"{reason}; propagated to {propagated} group(s)")
+    except Exception: pass
+    print(f"[autoban] {reason}: banned user {user.id} in chat {chat.id} (+{propagated} propagated)")
+    if OWNER_ID:
+        when = datetime.datetime.now(store._ET).strftime("%Y-%m-%d %H:%M")
+        note = autoban.evidence_text(
+            user_name=getattr(user, "full_name", None) or str(user.id),
+            username=getattr(user, "username", None), user_id=user.id,
+            chat_title=getattr(chat, "title", None) or str(chat.id),
+            chat_id=chat.id, when_et=when, reason=reason,
+            text=offending_text)
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton(
+            "🚩 Report them",
+            url=autoban.report_url(getattr(user, "username", None), user.id))]])
+        try: await ctx.bot.send_message(OWNER_ID, note, reply_markup=kb)
+        except Exception: pass
+
+async def _autoban_ai_linkage(update, ctx):
+    """The 'tried to make the bot post it' case: a /summary, /ask or
+    mention-ask just produced AI output that the outbound layer
+    killed as links-only. If the invoking user's OWN recent logged
+    messages in this chat are the same link-only pattern, they fed
+    the spam through the bot — same strike, deleting their logged
+    spam. (Only messages that reached the log can be found this way;
+    anything the protection/filter layers already deleted never got
+    logged, and a raw token call leaves no trace at all.)"""
+    chat, user = update.effective_chat, update.effective_user
+    if chat is None or user is None: return
+    if chat.type not in ("group", "supergroup"): return
+    try:
+        rows = store.get_messages(chat.id, limit=100)
+    except Exception:
+        return
+    now = int(time.time())
+    bad = [r for r in rows
+           if r["user_id"] == user.id and now - (r["ts"] or 0) < autoban.WINDOW_SECONDS
+           and autoban.is_link_only(r["text"] or "")]
+    if not bad: return
+    if await _autoban_exempt(ctx, chat, user): return
+    await _autoban_strike(ctx, chat=chat, user=user, reason="ai-launder",
+                          offending_text=bad[-1]["text"] or "",
+                          delete_ids=tuple(r["message_id"] for r in bad if r["message_id"]))
 
 USAGE_HONESTY_NOTE = ("Counts are what the bot has actually seen since usage tracking began. "
     "Telegram gives bots no list of their chats, so a group that never sends anything — and was "
@@ -635,13 +724,13 @@ async def on_summary(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("No messages logged yet — I can only summarize messages sent after I joined this group. Give it some activity, then try /summary again.")
         return
     if not AI_ENABLED:
-        await _send_ai_text(update, fallback_text(rows, detailed=detailed))
+        await _send_ai_text(update, fallback_text(rows, detailed=detailed), ctx)
         store.set_catchup(update.effective_chat.id, update.effective_user.id)
         return
     if not await ai_guard(update): return
     await update.effective_message.reply_text(f"Summarizing {len(rows)} messages…")
     out = await ai_client.summarize(rows, detailed=detailed, lang=user_lang(update))
-    await _send_ai_text(update, out)
+    await _send_ai_text(update, out, ctx)
     store.set_catchup(update.effective_chat.id, update.effective_user.id)
 
 async def on_catchup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -661,6 +750,7 @@ async def on_catchup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await send_long(update, f"📬 Catchup — {len(rows)} new messages (basic summary, AI off)\n\n{body}")
         else:
             print(f"[outbound-guard] catchup body sanitized to empty for chat {cid} — nothing sent")
+            await _autoban_ai_linkage(update, ctx)
         store.set_catchup(cid, uid)
         return
     if not await ai_guard(update): return
@@ -669,6 +759,7 @@ async def on_catchup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await send_long(update, f"📬 Catchup — {len(rows)} new messages\n\n{out}")
     else:
         print(f"[outbound-guard] catchup summary sanitized to empty for chat {cid} — nothing sent")
+        await _autoban_ai_linkage(update, ctx)
     store.set_catchup(cid, uid)
 
 async def on_tldr(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -698,7 +789,7 @@ async def on_ask(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         {"role":"user","content": q}], lang=user_lang(update))
     if not out:
         out = ai_client.DAILY_LIMIT_NOTE if budget.exhausted() else "AI isn't configured yet (no AI_API_KEY). The owner can add the key in Railway and I'll answer fully."
-    await _send_ai_text(update, out)
+    await _send_ai_text(update, out, ctx)
 
 
 def burn_keyboard(chat_id):
@@ -3147,6 +3238,25 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text: return
     chat, user, text = update.effective_chat, update.effective_user, update.message.text
     name = user.full_name + (f" (@{user.username})" if user.username else "")
+    # Auto-ban (2026-11-13): the incident attack patterns, in ANY
+    # group — not just protected ones. Runs first, before logging, so
+    # banned spam never reaches summaries. Pattern match is pure
+    # text; exemptions (owner / elevated / group admins / the bot
+    # itself) are checked only on a match.
+    if chat.type in ("group", "supergroup") and user is not None:
+        _ab_reason = autoban.classify(text)
+        _ab_extra = ()
+        if _ab_reason is None and autoban.is_link_only(text):
+            _ab_hits = LINK_ONLY_TRACKER.note(chat.id, user.id, update.message.message_id)
+            if _ab_hits:
+                _ab_reason = "linkspam"
+                _ab_extra = tuple(_ab_hits)
+        if _ab_reason is not None and not await _autoban_exempt(ctx, chat, user):
+            await _autoban_strike(
+                ctx, chat=chat, user=user, reason=_ab_reason, offending_text=text,
+                delete_ids=(update.message.message_id,)
+                + tuple(m for m in _ab_extra if m != update.message.message_id))
+            return
     # Group protection (protected groups only): a blacklisted word in any
     # message, or a link in a member's FIRST tracked message, removes the
     # sender (Cosmobot's anti-scam rules). Owner, elevated users, and the
@@ -3283,7 +3393,7 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 {"role":"user","content": q}], lang=user_lang(update))
             if not out:
                 out = ai_client.DAILY_LIMIT_NOTE if budget.exhausted() else "AI isn't configured yet (no AI_API_KEY)."
-            await _send_ai_text(update, out)
+            await _send_ai_text(update, out, ctx)
         return
     # Auto-translate (groups): runs last, so protection, filters, FAQ,
     # hashtags and mentions all keep priority over it.
@@ -3293,12 +3403,12 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if chat.type == "private" and len(text) > 600 and not text.startswith("/"):
         if not AI_ENABLED:
             rows = [{"user_name": name, "text": text, "ts": int(time.time())}]
-            await _send_ai_text(update, fallback_text(rows))
+            await _send_ai_text(update, fallback_text(rows), ctx)
             return
         if not await ai_guard(update): return
         rows = [{"user_name": name, "text": text, "ts": int(time.time())}]
         out = await ai_client.summarize(rows, lang=user_lang(update))
-        await _send_ai_text(update, out)
+        await _send_ai_text(update, out, ctx)
 
 # --- Owner issue alerts (2026-10-25): anything that goes wrong in a
 # handler or background job DMs the owner, throttled (same problem at

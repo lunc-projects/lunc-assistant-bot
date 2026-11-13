@@ -338,6 +338,21 @@ def mod_groups(approved_only=True):
         rows = c.execute("SELECT * FROM mod_groups ORDER BY approved, chat_id").fetchall()
     c.close(); return rows
 
+def known_group_chat_ids():
+    """Every group chat id the bot knows it belongs to: the usage
+    registry (still a member) plus the moderation group list. Used by
+    auto-ban propagation — a ban attempt anywhere the bot is not
+    actually an admin just fails and is skipped silently."""
+    c = _conn()
+    ids = set()
+    for r in c.execute("SELECT chat_id FROM usage_chats WHERE chat_id < 0 AND is_member = 1"):
+        ids.add(r[0])
+    for r in c.execute("SELECT chat_id FROM mod_groups"):
+        ids.add(r[0])
+    c.close()
+    return sorted(ids)
+
+
 def gban_add(user_id, reason, banned_by):
     c = _conn()
     c.execute("""INSERT INTO gbans(user_id, reason, banned_by, ts) VALUES(?, ?, ?, ?)
