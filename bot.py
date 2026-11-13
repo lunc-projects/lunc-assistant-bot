@@ -1481,13 +1481,22 @@ async def _owner_mod_alert(ctx, text, undo_user_id=None):
     except Exception:
         pass
 
-async def _gban_list(update, ctx, actor, at_names, extra_reason):
-    """Owner-only bulk /gban by @username (see on_gban list mode).
-    Resolution comes from store.resolve_username — the bot's own
-    message log only. Telegram itself gives bots no way to resolve a
-    bare @username, so names the bot has never seen are reported back
-    verbatim as not found (the auto-ban catches those accounts if
-    they ever post in a group this bot serves)."""
+async def _list_ban(update, ctx, actor, at_names, extra_reason, full):
+    """Shared owner-only bulk ban by @username (list mode for /gban
+    and /aiban). Resolution comes from store.resolve_username — the
+    bot's own message log only. Telegram itself gives bots no way to
+    resolve a bare @username, so names the bot has never seen are
+    reported back verbatim as not found (the auto-ban catches those
+    accounts if they ever post in a group this bot serves).
+
+    full=False (/gban list mode): the normal global ban only.
+    full=True (/aiban list mode): full removal — the AI ban AND the
+    global ban together. The owner reaches for /aiban by name; in
+    list mode he means these accounts gone, not just AI-muzzled.
+    Single-target /aiban stays light-touch (AI only) — see on_aiban.
+    A name counts as "already banned" only when every ban this mode
+    applies is already in place; a partial state (one of the two) is
+    completed here and reported under Banned."""
     reason = extra_reason.strip() or "global list ban"
     bot_id = getattr(ctx.bot, "id", None)
     seen, names = set(), []
@@ -1503,12 +1512,19 @@ async def _gban_list(update, ctx, actor, at_names, extra_reason):
         uid, match_type = hit
         if _is_owner(uid) or (bot_id is not None and uid == bot_id):
             skipped.append(typed); continue
-        if store.gban_get(uid) is not None:
+        gb_done = store.gban_get(uid) is not None
+        ai_done = full and store.ai_ban_get(uid) is not None
+        if gb_done and (ai_done or not full):
             already.append(typed); continue
-        store.gban_add(uid, reason, actor)
-        store.mod_log_add(actor, "gban", uid, update.effective_chat.id,
-                          f"{reason} (list ban: {typed})")
-        await _apply_gban(ctx, uid, True)
+        if full and not ai_done:
+            store.ai_ban_add(uid, reason, actor)
+            store.mod_log_add(actor, "aiban", uid, update.effective_chat.id,
+                              f"{reason} (list ban: {typed})")
+        if not gb_done:
+            store.gban_add(uid, reason, actor)
+            store.mod_log_add(actor, "gban", uid, update.effective_chat.id,
+                              f"{reason} (list ban: {typed})")
+            await _apply_gban(ctx, uid, True)
         banned.append(typed)
         if match_type == "display":
             display_matched.append(typed)
@@ -1544,8 +1560,9 @@ async def on_gban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if _at_names and not _has_reply:
         if not _is_owner(actor):
             await update.effective_message.reply_text("Owner only for list bans."); return
-        await _gban_list(update, ctx, actor, _at_names,
-                         " ".join(a for a in _args if not a.startswith("@")))
+        await _list_ban(update, ctx, actor, _at_names,
+                        " ".join(a for a in _args if not a.startswith("@")),
+                        full=False)
         return
     target, reason = _mod_target(update, ctx)
     if not target:
@@ -1610,13 +1627,32 @@ async def on_gbans(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def on_aiban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """AI ban: blocks ALL AI features for one user (every chat + DM).
     They keep chatting and keep every simple command — only the token-
-    spending features stop. The light-touch answer to AI abuse."""
+    spending features stop. The light-touch answer to AI abuse.
+
+    EXCEPTION — owner list mode (/aiban @name1 @name2 …): full
+    removal, AI ban + global ban together (see _list_ban full=True).
+    The owner pastes /aiban with the scam-network handle list; he
+    means those accounts gone. Single-target /aiban (reply or numeric,
+    any moderator) keeps the light-touch meaning above, unchanged."""
     if not await _can_moderate(update, ctx):
         await update.effective_message.reply_text("Only the owner, elevated users, or admins of a protected group can do this."); return
     actor = update.effective_user.id
+    # List mode (2026-11-13): same detection as on_gban — any @arg
+    # and no reply target (a reply still wins, so a reason that
+    # mentions an @name never hijacks a reply-ban). Owner-only.
+    _args = list(ctx.args or [])
+    _at_names = [a for a in _args if a.startswith("@")]
+    _has_reply = bool(update.message and update.message.reply_to_message)
+    if _at_names and not _has_reply:
+        if not _is_owner(actor):
+            await update.effective_message.reply_text("Owner only for list bans."); return
+        await _list_ban(update, ctx, actor, _at_names,
+                        " ".join(a for a in _args if not a.startswith("@")),
+                        full=True)
+        return
     target, reason = _mod_target(update, ctx)
     if not target:
-        await update.effective_message.reply_text("Usage: reply to their message with /aiban [reason], or /aiban <user_id> [reason]."); return
+        await update.effective_message.reply_text("Usage: reply to their message with /aiban [reason], or /aiban <user_id> [reason]. Owner list mode: /aiban @name1 @name2 … fully bans (AI ban + global ban) every @name the bot has seen."); return
     if _is_owner(target):
         await update.effective_message.reply_text("That user can't be AI-banned."); return
     if target == actor:
