@@ -14,7 +14,7 @@ try:
     from telegram.ext import TypeHandler
 except Exception:  # test stubs / very old PTB: the usage observer just stays off
     TypeHandler = None
-import store, ai_client, burn as burn_mod, chain, lang as lang_mod, ratelimit, budget, modquiz, topics, seclogic, alerts as alerts_mod, github_pr, stats_report, news as news_mod, walletwatch, translate as translate_mod
+import store, ai_client, burn as burn_mod, chain, lang as lang_mod, ratelimit, budget, modquiz, topics, seclogic, alerts as alerts_mod, github_pr, stats_report, news as news_mod, walletwatch, translate as translate_mod, outbound
 from kb import kb_as_text, find_kb_answer
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -179,6 +179,42 @@ async def send_long(update, text, parse_mode=None):
     summaries."""
     for ch in _line_chunks(text):
         await update.effective_message.reply_text(ch, parse_mode=parse_mode)
+
+# --- Outbound anti-spam guard (2026-11-13) ---
+# Choke point: main() patches Bot.send_message ONCE at startup, so every
+# text message the bot posts to a group/channel — Message.reply_text
+# included, it funnels through Bot.send_message — passes
+# outbound.outbound_blocked first. A message that is nothing but links /
+# @mentions never leaves the bot (incident + rules: outbound.py). DM
+# sends (owner alerts, report forwards) are not group posts and are
+# deliberately outside the guard. Returns None for a blocked send;
+# legitimate content never matches the block rule, so callers that use
+# the returned Message are unaffected in practice.
+def _install_outbound_guard():
+    from telegram import Bot as _TgBot
+    _orig = _TgBot.send_message
+    if getattr(_orig, "_outbound_guard", False):
+        return
+    async def _guarded_send_message(self, chat_id=None, text=None, *args, **kwargs):
+        if chat_id is None: chat_id = kwargs.pop("chat_id", None)
+        if text is None: text = kwargs.pop("text", None)
+        if outbound.is_group_chat_id(chat_id) and outbound.outbound_blocked(text):
+            print(f"[outbound-guard] BLOCKED bare link/mention message to chat {chat_id}: {str(text)[:40]!r}")
+            return None
+        return await _orig(self, chat_id=chat_id, text=text, *args, **kwargs)
+    _guarded_send_message._outbound_guard = True
+    _TgBot.send_message = _guarded_send_message
+
+async def _send_ai_text(update, text):
+    """Send summary-family / AI text through the outbound sanitize:
+    bare link/mention lines are stripped first; if nothing substantive
+    remains, nothing is sent (logged instead) — the bot never posts an
+    empty husk or a link list (2026-11-13)."""
+    clean = outbound.sanitize_ai_text(text)
+    if not clean:
+        print(f"[outbound-guard] AI text sanitized to empty for chat {update.effective_chat.id} — nothing sent")
+        return
+    await send_long(update, clean)
 
 USAGE_HONESTY_NOTE = ("Counts are what the bot has actually seen since usage tracking began. "
     "Telegram gives bots no list of their chats, so a group that never sends anything — and was "
@@ -506,6 +542,23 @@ async def on_rankclear(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     else:
         await update.effective_message.reply_text("No manual rank was set for that user — their earned rank already applies.")
 
+async def on_del(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Owner-only cleanup (2026-11-13): reply to any message in a group
+    with /del and the bot deletes that message (it runs as group admin
+    with delete permission) — the way to remove its own mistaken posts
+    and spam it posted or can't reach otherwise. Anyone else's /del is
+    ignored silently; a failed delete (too old / no permission) earns
+    the owner one brief reply saying so."""
+    if not OWNER_ID or update.effective_user.id != OWNER_ID: return
+    msg = update.effective_message
+    target = getattr(msg, "reply_to_message", None) if msg else None
+    if not target: return
+    try:
+        await target.delete()
+    except Exception as e:
+        try: await msg.reply_text(f"Couldn't delete that message ({type(e).__name__}) — it may be too old, or I lack delete permission in this group.")
+        except Exception: pass
+
 async def on_lang_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     code = (q.data or "").split(":", 1)[1] if ":" in (q.data or "") else ""
@@ -582,13 +635,13 @@ async def on_summary(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("No messages logged yet — I can only summarize messages sent after I joined this group. Give it some activity, then try /summary again.")
         return
     if not AI_ENABLED:
-        await send_long(update, fallback_text(rows, detailed=detailed))
+        await _send_ai_text(update, fallback_text(rows, detailed=detailed))
         store.set_catchup(update.effective_chat.id, update.effective_user.id)
         return
     if not await ai_guard(update): return
     await update.effective_message.reply_text(f"Summarizing {len(rows)} messages…")
     out = await ai_client.summarize(rows, detailed=detailed, lang=user_lang(update))
-    await send_long(update, out)
+    await _send_ai_text(update, out)
     store.set_catchup(update.effective_chat.id, update.effective_user.id)
 
 async def on_catchup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -603,12 +656,19 @@ async def on_catchup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("You're all caught up — no new messages since your last /catchup.")
         return
     if not AI_ENABLED:
-        await send_long(update, f"📬 Catchup — {len(rows)} new messages (basic summary, AI off)\n\n{ai_client.extractive_summary(rows)}")
+        body = outbound.sanitize_ai_text(ai_client.extractive_summary(rows))
+        if body:
+            await send_long(update, f"📬 Catchup — {len(rows)} new messages (basic summary, AI off)\n\n{body}")
+        else:
+            print(f"[outbound-guard] catchup body sanitized to empty for chat {cid} — nothing sent")
         store.set_catchup(cid, uid)
         return
     if not await ai_guard(update): return
-    out = await ai_client.summarize(rows, lang=user_lang(update))
-    await send_long(update, f"📬 Catchup — {len(rows)} new messages\n\n{out}")
+    out = outbound.sanitize_ai_text(await ai_client.summarize(rows, lang=user_lang(update)))
+    if out:
+        await send_long(update, f"📬 Catchup — {len(rows)} new messages\n\n{out}")
+    else:
+        print(f"[outbound-guard] catchup summary sanitized to empty for chat {cid} — nothing sent")
     store.set_catchup(cid, uid)
 
 async def on_tldr(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -638,7 +698,7 @@ async def on_ask(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         {"role":"user","content": q}], lang=user_lang(update))
     if not out:
         out = ai_client.DAILY_LIMIT_NOTE if budget.exhausted() else "AI isn't configured yet (no AI_API_KEY). The owner can add the key in Railway and I'll answer fully."
-    await send_long(update, out)
+    await _send_ai_text(update, out)
 
 
 def burn_keyboard(chat_id):
@@ -1123,6 +1183,10 @@ async def maybe_translate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         print(f"[translate] unexpected error (silent): {type(e).__name__}: {e}")
         return
     if out:
+        out = outbound.sanitize_ai_text(out)
+        if not out:
+            print(f"[outbound-guard] translation sanitized to empty in chat {update.effective_chat.id} — nothing sent")
+            return
         try: await msg.reply_text(out)
         except Exception: pass
 
@@ -2291,6 +2355,7 @@ async def on_learn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     out = await ai_client.chat([{"role":"system","content":"Explain the crypto/Terra Classic term in 2-3 plain lines for a beginner. No financial advice."},{"role":"user","content":w}], lang=user_lang(update))
     if not out:
         out = ai_client.DAILY_LIMIT_NOTE if budget.exhausted() else "I don't have that one yet — try /learn quorum"
+    out = outbound.sanitize_ai_text(out) or "I don't have that one yet — try /learn quorum"
     await update.effective_message.reply_text(out)
 
 # ================= GOV ALERTS (voting + proposals) =================
@@ -3218,7 +3283,7 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 {"role":"user","content": q}], lang=user_lang(update))
             if not out:
                 out = ai_client.DAILY_LIMIT_NOTE if budget.exhausted() else "AI isn't configured yet (no AI_API_KEY)."
-            await send_long(update, out)
+            await _send_ai_text(update, out)
         return
     # Auto-translate (groups): runs last, so protection, filters, FAQ,
     # hashtags and mentions all keep priority over it.
@@ -3228,12 +3293,12 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if chat.type == "private" and len(text) > 600 and not text.startswith("/"):
         if not AI_ENABLED:
             rows = [{"user_name": name, "text": text, "ts": int(time.time())}]
-            await send_long(update, fallback_text(rows))
+            await _send_ai_text(update, fallback_text(rows))
             return
         if not await ai_guard(update): return
         rows = [{"user_name": name, "text": text, "ts": int(time.time())}]
         out = await ai_client.summarize(rows, lang=user_lang(update))
-        await send_long(update, out)
+        await _send_ai_text(update, out)
 
 # --- Owner issue alerts (2026-10-25): anything that goes wrong in a
 # handler or background job DMs the owner, throttled (same problem at
@@ -3329,6 +3394,7 @@ async def post_init(app: Application):
 def main():
     if not TOKEN:
         raise SystemExit("TELEGRAM_BOT_TOKEN is missing — paste it in Railway env vars (never in chat/repo).")
+    _install_outbound_guard()
     _builder = Application.builder().token(TOKEN).post_init(post_init).post_shutdown(post_shutdown)
     _proxy = os.getenv("OUTBOUND_PROXY")
     if _proxy: _builder = _builder.proxy(_proxy).get_updates_proxy(_proxy)
@@ -3344,6 +3410,7 @@ def main():
     app.add_handler(CommandHandler("rank", on_rank))
     app.add_handler(CommandHandler("rankset", on_rankset))
     app.add_handler(CommandHandler("rankclear", on_rankclear))
+    app.add_handler(CommandHandler("del", on_del))
     app.add_handler(CommandHandler("language", on_language))
     app.add_handler(CommandHandler("summary", on_summary))
     app.add_handler(CommandHandler("catchup", on_catchup))
