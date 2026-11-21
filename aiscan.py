@@ -5,7 +5,10 @@ Tom's ask: "AI ban." Group messages that survive the deterministic
 patterns get classified by the bot's existing Groq setup (ai_client)
 for the scam shapes a keyword list misses — fake USDT OTC pitches in
 new wording (the tariff / overseas-trade script), giveaway scams,
-impersonation, paid spam-distribution ads (the Tianci pattern).
+impersonation, paid spam-distribution ads (the Tianci pattern), and
+recruitment / cash-reward referral ads (added 2026-11-21 after a
+"global recruitment — $1,000 cash reward" ad in General LUNC Chat
+sailed past both the prefilter and the classifier categories).
 
 Fail-safe by construction — a strike needs ALL of these:
 - the cheap prefilter passed (long enough + a scam-adjacent signal:
@@ -44,6 +47,15 @@ SIGNAL_WORDS = (
     "overseas", "international trade", "profit", "earn $", "investment",
     "presale", "seed phrase", "verify your wallet", "claim your",
     "free usdt", "free lunc", "send me", "rates above", "best rates",
+    # Recruitment / referral-reward ads (2026-11-21). Mostly
+    # phrase-shaped: bare "hiring", "refer a friend" or "partnership"
+    # must NOT buy a model call. "recruitment"/"recruiting" are in
+    # bare because the ad shape leans on them; a hit only buys a
+    # model call, and the classifier clears genuine job/validator
+    # discussion (see SYSTEM).
+    "cash reward", "global recruitment", "recruitment", "recruiting",
+    "refer a candidate", "referral reward", "referral bounty",
+    "team leaders", "market builders", "business partnership",
 )
 
 _LINK_OR_MENTION = re.compile(r"(https?://|www\.|t\.me/|@[A-Za-z0-9_]{3,})", re.I)
@@ -99,9 +111,16 @@ SYSTEM = (
     "(tariffs, overseas trade partners, payment-first, above-market "
     "rates), giveaway or airdrop scams, impersonation of admins or "
     "projects, paid spam-distribution ads, guaranteed-profit schemes, "
-    "seed-phrase or wallet-verification phishing. "
+    "seed-phrase or wallet-verification phishing, recruitment or "
+    "referral-reward ads (a cash reward or bounty for referring or "
+    "recruiting people into a crypto, forex or AI scheme; 'global "
+    "recruitment' drives; ads seeking 'team leaders' or 'market "
+    "builders' for such schemes). "
     "Normal chat, questions, price talk, opinions, jokes, and warnings "
-    "ABOUT scams are NOT scams. "
+    "ABOUT scams are NOT scams. Discussing, asking about, or "
+    "criticizing a recruitment drive, a referral program, a job, or "
+    "validator recruitment is NOT a scam either — only POSTING the "
+    "recruitment/reward ad itself is. "
     "Reply with EXACTLY one line: 'SCAM <confidence 0-100>' when the "
     "message is clearly one of these scams, otherwise 'OK'. "
     "When unsure, reply OK."

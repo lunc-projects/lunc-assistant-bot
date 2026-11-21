@@ -127,6 +127,26 @@ NORMAL = ("Hey everyone, how is the market looking today? I think LUNC will "
 WARNING = ("Careful everyone: never share your seed phrase with anyone, and "
            "never verify your wallet on a random site — that is how people "
            "get drained. Admins will never DM you first.")
+# The live miss (2026-11-21, General LUNC Chat, user "Judy"): a
+# recruitment / cash-reward referral ad the scan never flagged.
+JUDY = ("🔥 $1,000 CASH REWARD – GLOBAL RECRUITMENT! 💰 🌍 We are looking "
+        "for experienced team leaders, market builders, and professionals "
+        "in AI, Forex, cryptocurrency, and digital finance. 💎 Have a "
+        "strong network? 🤝 Know experienced industry professionals? 🚀 "
+        "Want to explore a new business partnership? Refer a qualified "
+        "candidate who successfully joins the partnership and receive a "
+        "$1,000 cash reward")
+# Near-miss legit messages: recruitment-shaped words, no ad. None of
+# these may ever strike.
+LEGIT_VALIDATORS = ("We are looking for experienced validators to join our "
+                    "network — if you run a solid node with good uptime, "
+                    "the community would love more decentralization.")
+LEGIT_REFERRAL_TALK = ("Did you see that post? Refer a friend to stake and "
+                       "the protocol pays a bonus in LUNC. Sounds too easy — "
+                       "is that legit or just marketing?")
+LEGIT_JOB_ASK = ("Does anyone here know a legit project hiring blockchain "
+                 "devs? I have been looking for work in crypto for weeks "
+                 "and could use a pointer.")
 
 # --- Prefilter units ---------------------------------------------------
 check("prefilter: 'hello' too short + no signal", not aiscan.prefilter("hello"))
@@ -135,6 +155,15 @@ check("prefilter: tariff script passes", aiscan.prefilter(TARIFF_SCRIPT))
 check("prefilter: scam-warning text passes (signal words) — model decides",
       aiscan.prefilter(WARNING))
 check("prefilter: short spam stays out", not aiscan.prefilter("buy usdt @someone"))
+check("prefilter: Judy's recruitment ad passes (reaches the model)",
+      aiscan.prefilter(JUDY))
+check("prefilter: validator-recruitment talk stays out",
+      not aiscan.prefilter(LEGIT_VALIDATORS))
+check("prefilter: job hunting stays out", not aiscan.prefilter(LEGIT_JOB_ASK))
+check("classifier prompt names the recruitment/reward category",
+      "referral-reward" in aiscan.SYSTEM and "global " in aiscan.SYSTEM)
+check("classifier prompt protects discussion of such schemes",
+      "only POSTING the" in aiscan.SYSTEM)
 
 # --- Verdict parsing ----------------------------------------------------
 check("parse: 'SCAM 92'", aiscan.parse_verdict("SCAM 92") == ("scam", 92))
@@ -320,6 +349,37 @@ async def main():
     fb = FakeBot(); AI_REPLY["text"] = None
     await post(fb, spammer, TARIFF_SCRIPT, mid=17)
     check("e2e: AI down — no ban, no delete", fb.bans == [] and fb.deleted == [])
+
+    # Judy's recruitment ad: high-confidence SCAM strikes.
+    judy = user(777, "judy")
+    fb = FakeBot(); AI_CALLS.clear(); AI_REPLY["text"] = "SCAM 95"
+    await post(fb, judy, JUDY, mid=18)
+    check("e2e: Judy recruitment ad at SCAM 95 — model was consulted",
+          len(scan_calls()) == 1)
+    check("e2e: Judy recruitment ad at SCAM 95 — banned",
+          (GROUP, 777) in fb.bans)
+    check("e2e: Judy recruitment ad at SCAM 95 — message deleted",
+          (GROUP, 18) in fb.deleted)
+
+    # Same ad, borderline verdict: nothing happens.
+    fb = FakeBot(); AI_REPLY["text"] = "SCAM 60"
+    await post(fb, judy, JUDY, mid=19)
+    check("e2e: Judy ad at SCAM 60 (borderline) — no ban, no delete",
+          fb.bans == [] and fb.deleted == [])
+
+    # Near-miss legit messages never strike — even with a hostile
+    # stub, the prefilter keeps them away from the model entirely.
+    fb = FakeBot(); AI_CALLS.clear(); AI_REPLY["text"] = "SCAM 99"
+    await post(fb, member, LEGIT_VALIDATORS, mid=20)
+    await post(fb, member, LEGIT_JOB_ASK, mid=21)
+    check("e2e: validator-recruitment + job-ask — model never called, no ban",
+          scan_calls() == [] and fb.bans == [] and fb.deleted == [])
+
+    # Referral-program DISCUSSION with a sane verdict: nothing.
+    fb = FakeBot(); AI_REPLY["text"] = "OK"
+    await post(fb, member, LEGIT_REFERRAL_TALK, mid=22)
+    check("e2e: referral-bonus discussion, verdict OK — no ban, no delete",
+          fb.bans == [] and fb.deleted == [])
 
     # Rate cap: the same user can only be scanned 3x/hour.
     fb = FakeBot(); AI_REPLY["text"] = "SCAM 95"
