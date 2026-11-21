@@ -85,6 +85,7 @@ Group admins can turn AI off or on for this group only: /aioff, /aion. Default i
 /protect — group admins: request scam protection for this group (the owner approves it)
 Protection means: new joiners pass a short safety check in my DM before they can post · accounts on the network's global scam-ban list are removed on sight · a member whose first message contains a link is removed
 /gban — reply to a scammer's message (or /gban <user id>): ban them from every protected group
+/ban — reply to a message: ban its sender from THIS group only and delete the message (this group's admins, elevated users, owner)
 /gunban <user id> — lift a global ban · /gbans — see the ban list
 /aiban — reply to an abusive user (or /aiban <user id>): block ALL AI features for them — simple commands still work · /aiunban <user id> lifts it · /aibans lists them
 Safety rails on bans: every global ban is written to a permanent log, the owner is alerted instantly with a one-tap undo button, non-owner moderators can global-ban at most 5 people a day, and nobody but the owner can global-ban the owner, an elevated user, or an admin of a protected group. /modlog (owner only) shows the record.
@@ -1724,6 +1725,44 @@ async def on_gban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await _owner_mod_alert(ctx,
             f"🚫 Global ban by moderator {actor}\nUser: {target}\nReason: {reason or '(none given)'}\nFrom chat: {update.effective_chat.id}\nRemoved from {ok} group(s)" + (f" ({fail} failed)" if fail else "") + "\nWrong call? Undo it:",
             undo_user_id=target)
+
+async def on_ban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/ban (2026-11-21): reply to a message in a group to ban its
+    sender FROM THIS GROUP ONLY and delete that message. Gate: the
+    owner, an elevated user, or an admin of THIS chat (checked live
+    via get_chat_member, fail closed — the group does NOT need to be
+    /protect-ed for its own admins to use it). The global list is a
+    separate, bigger step (/gban) and is untouched. Never raises."""
+    chat = update.effective_chat
+    if chat.type not in ("group", "supergroup"):
+        await update.effective_message.reply_text("Use /ban in a group, as a reply to the spammer's message."); return
+    actor = update.effective_user.id
+    if not (_is_owner(actor) or store.is_elevated(actor)
+            or await _is_group_admin(ctx, chat.id, actor)):
+        await update.effective_message.reply_text("Only the owner, elevated users, or an admin of this group can do this."); return
+    msg = update.effective_message
+    replied = getattr(msg, "reply_to_message", None) if msg is not None else None
+    target_user = getattr(replied, "from_user", None) if replied is not None else None
+    if target_user is None:
+        await update.effective_message.reply_text("Usage: reply to the spammer's message with /ban [reason]."); return
+    target = target_user.id
+    if _is_owner(target):
+        await update.effective_message.reply_text("That user can't be banned."); return
+    if target == actor:
+        await update.effective_message.reply_text("You can't ban yourself."); return
+    bot_id = getattr(ctx.bot, "id", None)
+    if bot_id is not None and target == bot_id:
+        await update.effective_message.reply_text("That user can't be banned."); return
+    reason = " ".join(ctx.args or [])
+    try:
+        await ctx.bot.ban_chat_member(chat.id, target)
+    except Exception:
+        await update.effective_message.reply_text("Couldn't ban them — the bot may lack admin rights here, or they're an admin."); return
+    try: await ctx.bot.delete_message(chat.id, replied.message_id)
+    except Exception: pass
+    try: store.mod_log_add(actor, "ban", target, chat.id, reason)
+    except Exception: pass
+    await update.effective_message.reply_text(f"🚫 User {target} is banned from this group" + (f" — {reason}" if reason else "") + ".")
 
 async def on_gunban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _can_moderate(update, ctx):
@@ -3867,6 +3906,7 @@ def main():
     app.add_handler(CommandHandler("deny", on_deny))
     app.add_handler(CommandHandler("groups", on_groups))
     app.add_handler(CommandHandler("gban", on_gban))
+    app.add_handler(CommandHandler("ban", on_ban))
     app.add_handler(CommandHandler("gunban", on_gunban))
     app.add_handler(CommandHandler("gbans", on_gbans))
     app.add_handler(CommandHandler("aiban", on_aiban))
