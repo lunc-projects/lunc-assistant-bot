@@ -367,6 +367,25 @@ async def main():
     check("e2e: Judy ad at SCAM 60 (borderline) — no ban, no delete",
           fb.bans == [] and fb.deleted == [])
 
+    # Bot-reply cleanup (2026-11-21): the bot had earlier replied to
+    # Judy's post (the DEX answer quoting it). When the post is
+    # struck, the bot's quoting reply is deleted too, so the ad text
+    # doesn't survive inside the bot's own message.
+    check("reply target: reply_to_message_id kwarg",
+          bot._reply_target_of({"reply_to_message_id": 42}) == 42)
+    check("reply target: reply_parameters object",
+          bot._reply_target_of({"reply_parameters": types.SimpleNamespace(message_id=43)}) == 43)
+    check("reply target: reply_parameters dict",
+          bot._reply_target_of({"reply_parameters": {"message_id": 44}}) == 44)
+    check("reply target: no reply kwargs", bot._reply_target_of({}) is None)
+    fb = FakeBot(); AI_REPLY["text"] = "SCAM 95"
+    bot._note_bot_reply(GROUP, 30, types.SimpleNamespace(message_id=900))
+    await post(fb, judy, JUDY, mid=30)
+    check("e2e: struck post deleted AND bot's quoting reply deleted with it",
+          (GROUP, 30) in fb.deleted and (GROUP, 900) in fb.deleted)
+    check("e2e: reply link consumed by the cleanup",
+          (GROUP, 30) not in bot.BOT_REPLY_LINKS)
+
     # Near-miss legit messages never strike — even with a hostile
     # stub, the prefilter keeps them away from the model entirely.
     fb = FakeBot(); AI_CALLS.clear(); AI_REPLY["text"] = "SCAM 99"

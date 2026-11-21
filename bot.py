@@ -182,6 +182,43 @@ async def send_long(update, text, parse_mode=None):
     for ch in _line_chunks(text):
         await update.effective_message.reply_text(ch, parse_mode=parse_mode)
 
+# --- Bot-reply linkage (2026-11-21) --------------------------------
+# When the bot posts a message AS A REPLY to a group message, the
+# reply quotes the original — so if the original is later struck as a
+# scam, the scam text would survive inside the bot's own quote (the
+# Judy case: her recruitment ad was answered with the DEX list, and
+# the quote kept the ad visible after she was banned). The outbound
+# choke point below records (chat, target message) -> bot message id
+# for every reply send; _autoban_strike deletes the linked bot
+# replies alongside the struck message. In-memory only — a redeploy
+# forgets links, which just means older quotes survive; the strike
+# itself is unaffected.
+BOT_REPLY_LINKS = {}
+
+def _note_bot_reply(chat_id, target_id, sent):
+    mid = getattr(sent, "message_id", None)
+    if chat_id and target_id and mid:
+        BOT_REPLY_LINKS.setdefault((chat_id, target_id), []).append(mid)
+
+def _reply_target_of(kwargs):
+    """Reply target message id from send_message kwargs, across PTB
+    generations: reply_to_message_id (older) or reply_parameters
+    (newer, object or dict)."""
+    t = kwargs.get("reply_to_message_id")
+    if t:
+        return t
+    rp = kwargs.get("reply_parameters")
+    if rp is not None:
+        return rp.get("message_id") if isinstance(rp, dict) else getattr(rp, "message_id", None)
+    return None
+
+async def _delete_bot_replies(ctx, chat_id, target_id):
+    """Delete the bot's own replies quoting message `target_id` in
+    this chat. Never raises."""
+    for mid in BOT_REPLY_LINKS.pop((chat_id, target_id), []):
+        try: await ctx.bot.delete_message(chat_id, mid)
+        except Exception: pass
+
 # --- Outbound anti-spam guard (2026-11-13) ---
 # Choke point: main() patches Bot.send_message ONCE at startup, so every
 # text message the bot posts to a group/channel — Message.reply_text
@@ -203,7 +240,14 @@ def _install_outbound_guard():
         if outbound.is_group_chat_id(chat_id) and outbound.outbound_blocked(text):
             print(f"[outbound-guard] BLOCKED bare link/mention message to chat {chat_id}: {str(text)[:40]!r}")
             return None
-        return await _orig(self, chat_id=chat_id, text=text, *args, **kwargs)
+        sent = await _orig(self, chat_id=chat_id, text=text, *args, **kwargs)
+        try:
+            _target = _reply_target_of(kwargs)
+            if _target:
+                _note_bot_reply(chat_id, _target, sent)
+        except Exception:
+            pass
+        return sent
     _guarded_send_message._outbound_guard = True
     _TgBot.send_message = _guarded_send_message
 
@@ -254,6 +298,9 @@ async def _autoban_strike(ctx, chat, user, reason, offending_text, delete_ids=()
     for mid in delete_ids:
         try: await ctx.bot.delete_message(chat.id, mid)
         except Exception: pass
+        # Take the bot's own replies quoting this message down too,
+        # so the scam text doesn't survive inside a bot quote.
+        await _delete_bot_replies(ctx, chat.id, mid)
     try: await ctx.bot.ban_chat_member(chat.id, user.id)
     except Exception: pass
     propagated = 0
