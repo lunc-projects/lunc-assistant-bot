@@ -50,6 +50,7 @@ REASON_LABELS = {
     "scam": "payment-scam bait with a contact handle",
     "linkspam": "repeated link-only posts",
     "ai-launder": "fed link spam through the bot's AI",
+    "aiscam": "AI-flagged scam/spam (high confidence)",
 }
 
 _TME = re.compile(r"^(?:https?://)?(?:t\.me|telegram\.me)/([A-Za-z0-9_]{3,})/?$",

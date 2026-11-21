@@ -14,7 +14,7 @@ try:
     from telegram.ext import TypeHandler
 except Exception:  # test stubs / very old PTB: the usage observer just stays off
     TypeHandler = None
-import store, ai_client, burn as burn_mod, chain, lang as lang_mod, ratelimit, budget, modquiz, topics, seclogic, alerts as alerts_mod, github_pr, stats_report, news as news_mod, walletwatch, translate as translate_mod, outbound, autoban
+import store, ai_client, burn as burn_mod, chain, lang as lang_mod, ratelimit, budget, modquiz, topics, seclogic, alerts as alerts_mod, github_pr, stats_report, news as news_mod, walletwatch, translate as translate_mod, outbound, autoban, aiscan
 from kb import kb_as_text, find_kb_answer
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -86,6 +86,7 @@ Group admins can turn AI off or on for this group only: /aioff, /aion. Default i
 Protection means: new joiners pass a short safety check in my DM before they can post · accounts on the network's global scam-ban list are removed on sight · a member whose first message contains a link is removed
 /gban — reply to a scammer's message (or /gban <user id>): ban them from every protected group
 /ban — reply to a message: ban its sender from THIS group only and delete the message (this group's admins, elevated users, owner)
+Automatic AI scan: a message the AI flags as a clear scam at very high confidence is deleted and the sender banned. Ordinary chat is never scanned, borderline calls do nothing, and admins and the owner are never auto-banned.
 /gunban <user id> — lift a global ban · /gbans — see the ban list
 /aiban — reply to an abusive user (or /aiban <user id>): block ALL AI features for them — simple commands still work · /aiunban <user id> lifts it · /aibans lists them
 Safety rails on bans: every global ban is written to a permanent log, the owner is alerted instantly with a one-tap undo button, non-owner moderators can global-ban at most 5 people a day, and nobody but the owner can global-ban the owner, an elevated user, or an admin of a protected group. /modlog (owner only) shows the record.
@@ -279,6 +280,31 @@ async def _autoban_strike(ctx, chat, user, reason, offending_text, delete_ids=()
             url=autoban.report_url(getattr(user, "username", None), user.id))]])
         try: await ctx.bot.send_message(OWNER_ID, note, reply_markup=kb)
         except Exception: pass
+
+AISCAN_LIMITER = aiscan.ScanLimiter()
+
+async def _aiscan_maybe(ctx, chat, user, text):
+    """AI scam scan (2026-11-21, aiscan.py): the model layer behind
+    the pure patterns. Returns 'aiscam' only when EVERY gate passes —
+    prefilter, rate cap, exemption (owner / elevated / group admins /
+    the bot are never even scanned), and a strict high-confidence
+    SCAM verdict. Anything else returns None: borderline or ordinary
+    messages are logged here only, never acted on. Never raises."""
+    try:
+        if not aiscan.prefilter(text):
+            return None
+        if not AISCAN_LIMITER.allow(chat.id, user.id):
+            print(f"[aiscan] scan cap hit in chat {chat.id} — skipping user {user.id}")
+            return None
+        if await _autoban_exempt(ctx, chat, user):
+            return None
+        conf = await aiscan.classify_scam(text)
+        if conf is None:
+            return None
+        print(f"[aiscan] high-confidence scam ({conf}) by user {user.id} in chat {chat.id}")
+        return "aiscam"
+    except Exception:
+        return None
 
 async def _autoban_ai_linkage(update, ctx):
     """The 'tried to make the bot post it' case: a /summary, /ask or
@@ -3589,6 +3615,10 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if _ab_hits:
                 _ab_reason = "linkspam"
                 _ab_extra = tuple(_ab_hits)
+        if _ab_reason is None:
+            # AI layer (2026-11-21): catches the scam scripts the
+            # patterns miss. Fail-safe — see _aiscan_maybe.
+            _ab_reason = await _aiscan_maybe(ctx, chat, user, text)
         if _ab_reason is not None and not await _autoban_exempt(ctx, chat, user):
             await _autoban_strike(
                 ctx, chat=chat, user=user, reason=_ab_reason, offending_text=text,
