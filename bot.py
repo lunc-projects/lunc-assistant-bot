@@ -693,20 +693,14 @@ async def job_usage_report(ctx: ContextTypes.DEFAULT_TYPE):
         counts = _report_counts()
         legacy = store.usage_counts()
         pot_spent, pot_budget = budget.spent(), budget.DAILY_TOKEN_BUDGET
-        text = None
-        if stats_report.configured():
-            try:
-                others = {}
-                for name, _title in OTHER_BOTS:
-                    others[name] = await stats_report.read_bot(name)
-                text = format_combined_report(counts, legacy, pot_spent, pot_budget, others)
-            except Exception:
-                text = None  # reads failed entirely -> solo fallback below
-        if text is None:
-            text = format_usage_report(counts, legacy, pot_spent, pot_budget)
+        # Owner ruling 2026-11-25: this daily update covers ONLY the
+        # LUNC Assistant Bot. The combined all-bots report (built under
+        # the 2026-10-27 ruling) is no longer sent; format_combined_report
+        # remains in the tree for its unit tests only.
+        text = format_usage_report(counts, legacy, pot_spent, pot_budget)
         # PLAIN TEXT — same byte-offset-44 Markdown defect as
         # /botstats lived here: the send raised BadRequest inside
-        # this job's try/except every night and the combined report
+        # this job's try/except every night and the report
         # silently never reached the owner.
         await ctx.bot.send_message(OWNER_ID, text)
         store.set_setting(0, "usage_report_day", today)

@@ -225,13 +225,19 @@ finally:
     os.environ.pop("UPSTASH_STATS_URL", None)
     os.environ.pop("UPSTASH_STATS_TOKEN", None)
 
-check("combined job sent exactly once", len(sent) == 1)
-check("combined job sent to the owner", sent and sent[0][0] == 999)
-check("combined job sent with parse_mode=None (plain text)",
+check("job sent exactly once", len(sent) == 1)
+check("job sent to the owner", sent and sent[0][0] == 999)
+check("job sent with parse_mode=None (plain text)",
       sent and sent[0][2] is None)
-check("combined job text is the all-bots report",
-      sent and "Daily usage — all bots" in sent[0][1])
-check("combined job marked the day sent (send succeeded in-job)",
+# Owner ruling 2026-11-25: the job text is the SOLO report (this bot
+# only), not the all-bots combined report.
+check("job text is the solo report",
+      sent and "LUNC Assistant — daily usage" in sent[0][1]
+      and "Daily usage — all bots" not in sent[0][1]
+      and "Garuda Assistant" not in sent[0][1]
+      and "Professor Crypto" not in sent[0][1]
+      and "DO Chain Assistant" not in sent[0][1])
+check("job marked the day sent (send succeeded in-job)",
       store.get_setting(0, "usage_report_day") == "2026-10-29")
 
 print()

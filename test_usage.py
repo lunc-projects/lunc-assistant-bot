@@ -351,12 +351,18 @@ try:
     _sr.read_bot = _fake_read_ok
     store.set_setting(0, "usage_report_day", "")
     asyncio.run(bot.job_usage_report(NS(bot=_FakeBot2())))
-    check("job sends the COMBINED report when reads work",
-          len(_sent2) == 1 and "Daily usage — all bots" in _sent2[0][1])
+    # Owner ruling 2026-11-25: the daily job sends the SOLO report
+    # (this bot only) even when the shared-stats reads work.
+    check("job sends the SOLO report when reads work",
+          len(_sent2) == 1 and "LUNC Assistant — daily usage" in _sent2[0][1]
+          and "all bots" not in _sent2[0][1]
+          and "Garuda Assistant" not in _sent2[0][1]
+          and "Professor Crypto" not in _sent2[0][1]
+          and "DO Chain Assistant" not in _sent2[0][1])
     _sr.read_bot = _fake_read_boom
     store.set_setting(0, "usage_report_day", "")
     asyncio.run(bot.job_usage_report(NS(bot=_FakeBot2())))
-    check("job falls back to the SOLO report when reads fail entirely",
+    check("job still sends the SOLO report when reads fail entirely",
           len(_sent2) == 2 and "LUNC Assistant — daily usage" in _sent2[1][1]
           and "all bots" not in _sent2[1][1])
 finally:
