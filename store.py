@@ -396,6 +396,20 @@ def known_group_chat_ids():
     return sorted(ids)
 
 
+def member_group_chat_ids():
+    """Group chat ids the daily report counts as 'Groups I'm in':
+    usage_chats rows still marked member — the same definition as
+    usage_counts()['groups_member'], as a sorted id list. Unlike
+    known_group_chat_ids() this does NOT union in the moderation
+    list; it is exactly the confirmed-member set."""
+    c = _conn()
+    ids = [r[0] for r in c.execute(
+        "SELECT chat_id FROM usage_chats WHERE chat_id < 0 AND is_member = 1"
+        " ORDER BY chat_id")]
+    c.close()
+    return ids
+
+
 def gban_add(user_id, reason, banned_by):
     c = _conn()
     c.execute("""INSERT INTO gbans(user_id, reason, banned_by, ts) VALUES(?, ?, ?, ?)

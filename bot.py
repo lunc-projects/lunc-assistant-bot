@@ -1630,6 +1630,27 @@ async def on_groups(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         lines.append(f"{'🛡' if r['approved'] else '⏳ pending'} {r['title'] or '(no title)'} — chat id {r['chat_id']}")
     await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
+async def on_mygroups(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not await _owner_only(update): return
+    ids = store.member_group_chat_ids()
+    if not ids:
+        await update.effective_message.reply_text("I'm not a confirmed member of any group right now."); return
+    # Plain text, no parse_mode: group titles are user-controlled and
+    # can carry Markdown characters that would break (or be rejected
+    # by) a Markdown send — same lesson as the 2026-10-29 reports fix.
+    lines = [f"Groups I'm in ({len(ids)}):"]
+    for chat_id in ids:
+        try:
+            chat = await ctx.bot.get_chat(chat_id)
+            name = getattr(chat, "title", None) or "(no title)"
+            username = getattr(chat, "username", None)
+            if username:
+                name = f"{name} (@{username})"
+            lines.append(f"{name} — {chat_id}")
+        except Exception:
+            lines.append(f"{chat_id} — (couldn't look up — maybe removed)")
+    await update.effective_message.reply_text("\n".join(lines))
+
 async def _apply_gban(ctx, target_id, ban):
     ok = fail = 0
     for g in store.mod_groups():
@@ -3976,6 +3997,7 @@ def main():
     app.add_handler(CommandHandler("approve", on_approve))
     app.add_handler(CommandHandler("deny", on_deny))
     app.add_handler(CommandHandler("groups", on_groups))
+    app.add_handler(CommandHandler("mygroups", on_mygroups))
     app.add_handler(CommandHandler("gban", on_gban))
     app.add_handler(CommandHandler("ban", on_ban))
     app.add_handler(CommandHandler("gunban", on_gunban))
