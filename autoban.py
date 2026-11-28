@@ -18,6 +18,11 @@ Deliberately tight — a normal member should never trip these:
 - "scam": a payment-scam bait phrase from SCAM_PHRASES *and* a
   contact (an @mention or any link) in the same message. A phrase
   alone, or a contact alone, is not enough.
+- "mule": a money-mule recruitment ad (2026-11-27). Mule-specific
+  terms (代收 / 跑分) fire alone; recruiting + collect-payments
+  phrasing fires together; an income claim (日入<figure> / "daily
+  income <figure>") fires ONLY alongside a recruiting or collecting
+  phrase — income talk alone never fires.
 - "linkspam" (tracker): a second link/mention-only message from the
   same user in the same chat within WINDOW_SECONDS.
 
@@ -48,6 +53,7 @@ SCAM_PHRASES = (
 REASON_LABELS = {
     "botlist": "bare bot-link list",
     "scam": "payment-scam bait with a contact handle",
+    "mule": "money-mule recruitment ad",
     "linkspam": "repeated link-only posts",
     "ai-launder": "fed link spam through the bot's AI",
     "aiscam": "AI-flagged scam/spam (high confidence)",
@@ -106,12 +112,67 @@ def is_payment_scam(text):
     return _has_contact(text)
 
 
+# Money-mule recruitment (2026-11-27): scammers hire people to receive
+# and forward payments through their own accounts (laundering). The
+# incident ad was just "招代收，日入8000" — 8 characters, far under the
+# AI layer's minimum length, so this deterministic layer is its only
+# home. Rules (owner ruling): the mule-specific terms fire alone;
+# recruiting + collecting fires together; an income claim fires ONLY
+# with a recruiting or collecting phrase — income talk alone, in
+# English or Chinese, never fires. Accepted trade-off: a warning post
+# quoting the raw term 代收 trips the standalone rule; admins, the
+# owner and elevated users are exempt in bot.py.
+MULE_TERMS = ("代收", "跑分")
+
+RECRUIT_PHRASES_EN = (
+    "seeking agents",
+    "agents wanted",
+    "hiring agents",
+    "recruiting agents",
+    "looking for agents",
+    "need agents",
+)
+RECRUIT_PHRASES_CN = ("招代理", "招人", "招聘", "招募")
+
+COLLECT_PHRASES_EN = (
+    "collect payments",
+    "collect payment",
+    "receive payments",
+    "receive payment",
+)
+COLLECT_PHRASES_CN = ("收款", "代收款")
+
+_INCOME_CN = re.compile(r"日入\s*[¥$]?\s*\d")
+_INCOME_EN = re.compile(r"daily income\D{0,20}\d")
+
+
+def _has_income_claim(raw, low):
+    return bool(_INCOME_CN.search(raw) or _INCOME_EN.search(low))
+
+
+def is_mule_recruitment(text):
+    """Pattern (d): money-mule recruitment ad."""
+    raw = str(text or "")
+    low = " ".join(raw.lower().split())
+    if any(t in raw for t in MULE_TERMS):
+        return True
+    recruit = (any(p in low for p in RECRUIT_PHRASES_EN)
+               or any(p in raw for p in RECRUIT_PHRASES_CN))
+    collect = (any(p in low for p in COLLECT_PHRASES_EN)
+               or any(p in raw for p in COLLECT_PHRASES_CN))
+    if recruit and collect:
+        return True
+    return _has_income_claim(raw, low) and (recruit or collect)
+
+
 def classify(text):
-    """Single-message triggers: 'botlist' | 'scam' | None."""
+    """Single-message triggers: 'botlist' | 'scam' | 'mule' | None."""
     if is_bare_bot_list(text):
         return "botlist"
     if is_payment_scam(text):
         return "scam"
+    if is_mule_recruitment(text):
+        return "mule"
     return None
 
 

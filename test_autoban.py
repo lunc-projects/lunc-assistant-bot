@@ -143,6 +143,26 @@ check("contact without scam phrase -> no trigger",
       autoban.classify("thanks @YLzhangwei888 that was fast") is None)
 check("normal sentence with a link -> no trigger",
       autoban.classify("look at this chart https://example.com/chart it is wild") is None)
+check("incident mule ad (CN) -> mule",
+      autoban.classify("招代收，日入8000") == "mule")
+check("standalone mule term -> mule", autoban.classify("需要代收服务的联系我") == "mule")
+check("standalone score-running term -> mule", autoban.classify("跑分团队了解一下") == "mule")
+check("incident mule ad (EN shape) -> mule",
+      autoban.classify("Seeking agents to collect payments; daily income 8000") == "mule")
+check("recruit + collect, no income figure -> mule",
+      autoban.classify("Agents wanted to collect payments, good rates") == "mule")
+check("income claim + recruiting, no collect phrase -> mule",
+      autoban.classify("hiring agents now, daily income 500 for the right people") == "mule")
+check("EN income talk alone -> no trigger",
+      autoban.classify("my daily income from staking is small") is None)
+check("EN income figure alone -> no trigger",
+      autoban.classify("daily income 8000 from my delivery job, long hours") is None)
+check("CN income figure alone -> no trigger",
+      autoban.classify("我日入8000，靠送外卖") is None)
+check("collect payments in a normal question -> no trigger",
+      autoban.classify("how do I collect payments from my customers?") is None)
+check("recruiting talk without payments -> no trigger",
+      autoban.classify("we are hiring agents for our real estate office") is None)
 check("plain chat -> no trigger", autoban.classify("good morning everyone") is None)
 check("link-only detector: bare url", autoban.is_link_only("https://example.com/x"))
 check("link-only detector: sentence is not link-only",
@@ -303,6 +323,17 @@ async def main():
     check("(c) scam ad poster banned", (GA, SPAM) in fb.bans)
     check("(c) ad deleted", (GA, 40) in fb.deleted)
     check("(c) evidence DM sent", len(owner_dms(fb)) == 1)
+
+    # (d) Money-mule recruitment ad (2026-11-27 incident shape).
+    fb = FakeBot(); bot.LINK_ONLY_TRACKER.reset()
+    await post(fb, user(SPAM, "mule888"), GA, "招代收，日入8000", mid=41)
+    check("(d) mule ad poster banned", (GA, SPAM) in fb.bans)
+    check("(d) mule ad deleted", (GA, 41) in fb.deleted)
+    dms = owner_dms(fb)
+    check("(d) evidence DM sent", len(dms) == 1)
+    if dms:
+        check("(d) DM labels it money-mule recruitment",
+              "money-mule recruitment ad" in dms[0][1])
 
     # Exemptions: admin, owner, elevated, the bot itself.
     fb = FakeBot(); fb.admins.add((GA, ADMIN)); bot.LINK_ONLY_TRACKER.reset()
